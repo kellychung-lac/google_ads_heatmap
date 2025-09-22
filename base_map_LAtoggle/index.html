@@ -27,7 +27,6 @@
       }
       .control-card h4 { margin: 4px 0 6px; font-size: 12px; }
       .control-card label { display: block; cursor: pointer; margin: 2px 0; }
-      .control-card small { color: #666; }
 
       .legend {
         background: #fff;
@@ -99,7 +98,6 @@
       }
 
       function computeRangesFromDataset(metrics) {
-        // Raw fields (Option B)
         return {
           clicks:      scanMinMax(metrics, "val_clicks"),
           conversions: scanMinMax(metrics, "val_conversions"),
@@ -110,16 +108,16 @@
       // -------- state --------
       const state = {
         campaign: "ALL",
-        metric: "Clicks", // Clicks | CTR | Conversions
+        metric: "Clicks",
         metrics: null,
-        scales: null,     // { clicks:[min,max], conversions:[min,max], ctr:[min,max] } on raw values
+        scales: null,
         cityProp: null,
         map: null,
         fillLayer: null,
         labelLayer: null,
         legend: null,
         showLabels: true,
-        includeLA: (localStorage.getItem("includeLA") ?? "true") === "true", // persist LA
+        includeLA: (localStorage.getItem("includeLA") ?? "true") === "true",
       };
 
       // Path helpers
@@ -138,7 +136,6 @@
           const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([min, max]);
           return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
         } else {
-          // Log scaling for Clicks/Conversions (raw values)
           const eps = 1e-9;
           const minPos = (min > 0 ? min : findMinPositive(metric) || eps);
           const logMin = Math.log10(Math.max(minPos, eps));
@@ -166,15 +163,11 @@
       function styleFeature(feat) {
         const city = feat.properties[state.cityProp];
         const rec  = (state.metrics.data[state.campaign] || {})[city] || null;
-
-        // Use RAW values for color (Option B)
         const v =
           state.metric === "CTR"      ? rec?.val_ctr :
           state.metric === "Clicks"   ? rec?.val_clicks :
                                         rec?.val_conversions;
-
         const fill = getScale(state.metric)(v);
-
         return {
           color: "#000",
           weight: 0.4,
@@ -195,10 +188,7 @@
       function onEachFeature(feat, layer) {
         const city = feat.properties[state.cityProp];
         const rec  = (state.metrics.data[state.campaign] || {})[city] || null;
-        layer.bindTooltip(
-          `<b>${city}</b><br>${state.metric}: ${formatValue(rec)}`,
-          { sticky: true, direction: "auto" }
-        );
+        layer.bindTooltip(`<b>${city}</b><br>${state.metric}: ${formatValue(rec)}`, { sticky: true });
       }
 
       function rebuildChoropleth() {
@@ -231,13 +221,7 @@
               <h4>Los Angeles</h4>
               <label><input type="radio" name="la" value="on"  ${state.includeLA ? "checked" : ""}/> On</label>
               <label><input type="radio" name="la" value="off" ${state.includeLA ? "" : "checked"}/> Off</label>
-              <small id="la-help">${state.includeLA ? "Using ./data/*" : "Using ./data_noLA/*_noLA.*"}</small>
             `;
-
-            function syncLAHelp() {
-              const help = div.querySelector("#la-help");
-              if (help) help.textContent = state.includeLA ? "Using ./data/*" : "Using ./data_noLA/*_noLA.*";
-            }
 
             div.addEventListener("change", async (e) => {
               if (e.target.name === "camp") {
@@ -258,9 +242,8 @@
               }
               if (e.target.name === "la") {
                 state.includeLA = e.target.value === "on";
-                localStorage.setItem("includeLA", state.includeLA); // persist
-                syncLAHelp();
-                await loadDataset(); // reload data & recolor
+                localStorage.setItem("includeLA", state.includeLA);
+                await loadDataset();
               }
             });
 
@@ -272,7 +255,7 @@
         return new Control();
       }
 
-      // -------- legend (no LA controls here) --------
+      // -------- legend --------
       function ensureLegend() {
         if (state.legend) return;
         const Legend = L.Control.extend({
@@ -291,78 +274,40 @@
         state.map.addControl(state.legend);
       }
 
-      function maxDecimals(val, n) {
-        const s = val.toFixed(n);
-        return s.replace(/(\.\d*?[1-9])0+$|\.0+$/,'$1');
-      }
-
-      function formatCompact(v) {
-        if (!Number.isFinite(v)) return "—";
-        const abs = Math.abs(v);
-        if (abs >= 1e9)  return (v / 1e9).toFixed(1).replace(/\.0$/,"") + "B";
-        if (abs >= 1e6)  return (v / 1e6).toFixed(1).replace(/\.0$/,"") + "M";
-        if (abs >= 1e3)  return (v / 1e3).toFixed(1).replace(/\.0$/,"") + "K";
-        return maxDecimals(v, 2);
-      }
-
       function updateLegend() {
         ensureLegend();
-
         const [minRaw, maxRaw] =
           state.metric === "CTR" ? state.scales.ctr :
           state.metric === "Clicks" ? state.scales.clicks :
           state.scales.conversions;
-
         document.getElementById("legend-title").textContent =
           state.metric + (state.metric === "CTR" ? "" : " (log-scaled)");
-
         document.getElementById("legend-min").textContent =
-          state.metric === "CTR"
-            ? (minRaw * 100).toFixed(1) + "%"
-            : formatCompact(minRaw);
-
+          state.metric === "CTR" ? (minRaw * 100).toFixed(1) + "%" : minRaw.toLocaleString();
         document.getElementById("legend-max").textContent =
-          state.metric === "CTR"
-            ? (maxRaw * 100).toFixed(1) + "%"
-            : formatCompact(maxRaw);
+          state.metric === "CTR" ? (maxRaw * 100).toFixed(1) + "%" : maxRaw.toLocaleString();
       }
 
       // ----- LABELS -----
       let labelData = null;
-
-      function clearLabels() {
-        if (state.labelLayer) {
-          state.map.removeLayer(state.labelLayer);
-          state.labelLayer = null;
-        }
-      }
-
+      function clearLabels() { if (state.labelLayer) { state.map.removeLayer(state.labelLayer); state.labelLayer = null; } }
       function updateLabels() {
         if (!labelData) return;
         clearLabels();
         if (!state.showLabels) return;
-
         const markers = labelData.map((pt) =>
           L.marker([pt.lat, pt.lon], {
-            icon: L.divIcon({
-              className: "",
-              html: `<div class="city-label">${pt.city}</div>`,
-            }),
+            icon: L.divIcon({ className: "", html: `<div class="city-label">${pt.city}</div>` }),
             interactive: false,
           })
         );
-
         state.labelLayer = L.layerGroup(markers).addTo(state.map);
-
         function toggleByZoom() {
           const z = state.map.getZoom();
-          state.labelLayer
-            .getLayers()
-            .forEach(
-              (m) => (m.getElement().style.display = z >= 7 ? "block" : "none")
-            );
+          state.labelLayer.getLayers().forEach(
+            (m) => (m.getElement().style.display = z >= 7 ? "block" : "none")
+          );
         }
-
         toggleByZoom();
         state.map.off("zoomend", toggleByZoom);
         state.map.on("zoomend", toggleByZoom);
@@ -370,53 +315,28 @@
 
       // -------- dataset loader --------
       async function loadDataset() {
-        // 1) metrics (raw ranges recomputed from dataset)
         state.metrics = await fetchGzipJSON(path("city_metrics", "json.gz"));
         state.scales  = computeRangesFromDataset(state.metrics);
-
-        // 2) geometry
         const geo = await fetchGzipGeoOrTopoAsGeoJSON(path("regions", "geojson.gz"));
         state.cityProp = detectCityProp(geo.features[0]);
-
-        // reset/replace layer
-        if (state.fillLayer) {
-          state.map.removeLayer(state.fillLayer);
-          state.fillLayer = null;
-        }
-        state.fillLayer = L.geoJSON(geo, {
-          style: styleFeature,
-          onEachFeature,
-        }).addTo(state.map);
-
-        // 3) labels
+        if (state.fillLayer) { state.map.removeLayer(state.fillLayer); state.fillLayer = null; }
+        state.fillLayer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(state.map);
         labelData = await fetchGzipJSON(path("city_labels", "json.gz"));
         updateLabels();
-
-        // 4) legend + recolor
         updateLegend();
         rebuildChoropleth();
       }
 
-      // -------- boot --------
       (async function main() {
         state.map = L.map("map").setView([36.7783, -119.4179], 6);
-
         L.tileLayer(
           "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png",
-          {
-            attribution: "&copy; OpenStreetMap contributors & Carto",
-            maxZoom: 18,
-          }
+          { attribution: "&copy; OpenStreetMap contributors & Carto", maxZoom: 18 }
         ).addTo(state.map);
-
         state.map.addControl(makeRadioControl());
         ensureLegend();
-
         await loadDataset();
-      })().catch((err) => {
-        console.error(err);
-        alert(err.message);
-      });
+      })().catch((err) => { console.error(err); alert(err.message); });
     </script>
   </body>
 </html>
