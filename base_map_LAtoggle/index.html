@@ -218,7 +218,7 @@
               <h4>Labels</h4>
               <label><input type="checkbox" name="labels" ${state.showLabels ? "checked" : ""}/> City Name</label>
               <hr/>
-              <h4>Los Angeles</h4>
+              <h4>LA + SD</h4>
               <label><input type="radio" name="la" value="on"  ${state.includeLA ? "checked" : ""}/> On</label>
               <label><input type="radio" name="la" value="off" ${state.includeLA ? "" : "checked"}/> Off</label>
             `;
@@ -330,7 +330,7 @@
       (async function main() {
         state.map = L.map("map").setView([36.7783, -119.4179], 6);
         L.tileLayer(
-          "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_noLA_noSDbels/{z}/{x}/{y}.png",
+          "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png",
           { attribution: "&copy; OpenStreetMap contributors & Carto", maxZoom: 18 }
         ).addTo(state.map);
         state.map.addControl(makeRadioControl());
