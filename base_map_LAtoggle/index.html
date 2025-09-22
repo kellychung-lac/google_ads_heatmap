@@ -40,25 +40,14 @@
       }
       .legend .scale {
         height: 10px;
-        width: 160px;
+        width: 180px;
         background: linear-gradient(to right, #f7fbff, #08306b);
         margin: 4px 0;
       }
-      .legend .row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-top: 6px;
-      }
-      .legend .btn {
-        appearance: none;
-        border: 1px solid #ccc;
-        background: #f9f9f9;
-        border-radius: 4px;
-        padding: 4px 8px;
-        cursor: pointer;
-      }
-      .legend .btn:active { transform: translateY(1px); }
+      .legend .row { margin-top: 6px; }
+      .legend .inline { display: inline-flex; gap: 8px; align-items: center; }
+      .legend .group { margin-top: 8px; }
+      .legend .group h4 { margin: 0 0 4px; font-size: 12px; }
 
       .city-label {
         font-weight: 600;
@@ -100,53 +89,106 @@
         return keys.length ? keys[0] : "CITY";
       }
 
+      function scanMinMax(metrics, key) {
+        let min = +Infinity, max = -Infinity;
+        for (const camp of Object.values(metrics.data || {})) {
+          for (const rec of Object.values(camp || {})) {
+            const v = rec?.[key];
+            if (Number.isFinite(v)) {
+              if (v < min) min = v;
+              if (v > max) max = v;
+            }
+          }
+        }
+        if (!Number.isFinite(min)) min = 0;
+        if (!Number.isFinite(max)) max = 1;
+        return [min, max];
+      }
+
+      function computeRangesFromDataset(metrics) {
+        // Raw fields (Option B)
+        return {
+          clicks:      scanMinMax(metrics, "val_clicks"),
+          conversions: scanMinMax(metrics, "val_conversions"),
+          ctr:         scanMinMax(metrics, "val_ctr"),
+        };
+      }
+
       // -------- state --------
       const state = {
         campaign: "ALL",
         metric: "Clicks", // Clicks | CTR | Conversions
         metrics: null,
-        scales: null,
+        scales: null,     // { clicks:[min,max], conversions:[min,max], ctr:[min,max] } on raw values
         cityProp: null,
         map: null,
         fillLayer: null,
         labelLayer: null,
         legend: null,
         showLabels: true,
-        includeLA: true, // ← NEW: LA on/off
+        includeLA: true,  // LA on/off
       };
 
       // Path helpers that flip between data/ and data_noLA/, and *_noLA.*
       function baseDir()     { return state.includeLA ? "./data"      : "./data_noLA"; }
       function nameWithSuf(n){ return state.includeLA ? n             : `${n}_noLA`; }
       function path(n, ext)  { return `${baseDir()}/${nameWithSuf(n)}.${ext}`; }
-      // ext examples: "json.gz", "geojson.gz" (already compressed)
 
+      // Color scale builder (Option B)
       function getScale(metric) {
-        const [min, max] =
+        let [min, max] =
           metric === "CTR" ? state.scales.ctr :
           metric === "Clicks" ? state.scales.clicks :
           state.scales.conversions;
 
-        const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([min, max]);
-        return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
+        if (metric === "CTR") {
+          // Linear [min, max] for CTR (0–1)
+          const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([min, max]);
+          return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
+        } else {
+          // Log scaling for Clicks/Conversions on raw values
+          const eps = 1e-9;
+          const minPos = (min > 0 ? min : findMinPositive(metric) || eps);
+          const logMin = Math.log10(Math.max(minPos, eps));
+          const logMax = Math.log10(Math.max(max, eps));
+          const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([logMin, logMax]);
+
+          return (v) => {
+            const u = (Number.isFinite(v) && v > 0) ? Math.log10(v) : NaN;
+            return Number.isFinite(u) ? scale(u).hex() : "#d3d3d3";
+          };
+        }
+      }
+
+      function findMinPositive(metric) {
+        const key = metric === "Clicks" ? "val_clicks" : "val_conversions";
+        let minPos = +Infinity;
+        for (const camp of Object.values(state.metrics?.data || {})) {
+          for (const rec of Object.values(camp || {})) {
+            const v = rec?.[key];
+            if (Number.isFinite(v) && v > 0 && v < minPos) minPos = v;
+          }
+        }
+        return Number.isFinite(minPos) ? minPos : null;
       }
 
       function styleFeature(feat) {
         const city = feat.properties[state.cityProp];
-        const rec = (state.metrics.data[state.campaign] || {})[city] || null;
-        let cv = null;
+        const rec  = (state.metrics.data[state.campaign] || {})[city] || null;
 
-        if (state.metric === "Clicks") cv = rec?.val_clicks_color;
-        else if (state.metric === "CTR") cv = rec?.val_ctr_color;
-        else cv = rec?.val_conversions_color;
+        // Use RAW values for color (Option B)
+        const v =
+          state.metric === "CTR"      ? rec?.val_ctr :
+          state.metric === "Clicks"   ? rec?.val_clicks :
+                                        rec?.val_conversions;
 
-        const fill = getScale(state.metric)(cv);
+        const fill = getScale(state.metric)(v);
 
         return {
           color: "#000",
           weight: 0.4,
           fillColor: fill,
-          fillOpacity: Number.isFinite(cv) ? 0.75 : 0.25,
+          fillOpacity: Number.isFinite(v) ? 0.75 : 0.25,
         };
       }
 
@@ -161,10 +203,11 @@
 
       function onEachFeature(feat, layer) {
         const city = feat.properties[state.cityProp];
-        const rec = (state.metrics.data[state.campaign] || {})[city] || null;
-        layer.bindTooltip(`<b>${city}</b><br>${state.metric}: ${formatValue(rec)}`, {
-          sticky: true, direction: "auto"
-        });
+        const rec  = (state.metrics.data[state.campaign] || {})[city] || null;
+        layer.bindTooltip(
+          `<b>${city}</b><br>${state.metric}: ${formatValue(rec)}`,
+          { sticky: true, direction: "auto" }
+        );
       }
 
       function rebuildChoropleth() {
@@ -202,8 +245,8 @@
               }
               if (e.target.name === "metric") {
                 state.metric = e.target.value;
-                rebuildChoropleth();
                 updateLegend();
+                rebuildChoropleth();
                 updateLabels();
               }
               if (e.target.name === "labels") {
@@ -231,26 +274,42 @@
               <div><b id="legend-title"></b></div>
               <div class="scale"></div>
               <div><span id="legend-min"></span> – <span id="legend-max"></span></div>
-              <div class="row">
-                <button id="btn-la" class="btn" type="button"></button>
-                <small id="la-help"></small>
+
+              <div class="group">
+                <h4>Los Angeles</h4>
+                <div class="inline">
+                  <label><input type="radio" name="la" value="on"  checked/> On</label>
+                  <label><input type="radio" name="la" value="off" /> Off</label>
+                </div>
+                <div class="row"><small id="la-help"></small></div>
               </div>
             `;
-            // hook up the button once it exists in DOM
-            setTimeout(() => {
-              const btn = div.querySelector("#btn-la");
-              const help = div.querySelector("#la-help");
-              function syncLabel() {
-                btn.textContent = `LA: ${state.includeLA ? "On" : "Off"}`;
-                help.textContent = state.includeLA ? "(using ./data/*)" : "(using ./data_noLA/*_noLA.*)";
+
+            // Wire up LA radios
+            const help = div.querySelector("#la-help");
+            function syncHelp() {
+              help.textContent = state.includeLA
+                ? "Using ./data/*"
+                : "Using ./data_noLA/*_noLA.*";
+              const on = div.querySelector('input[name="la"][value="on"]');
+              const off = div.querySelector('input[name="la"][value="off"]');
+              if (on && off) {
+                on.checked = state.includeLA;
+                off.checked = !state.includeLA;
               }
-              syncLabel();
-              btn.addEventListener("click", async () => {
-                state.includeLA = !state.includeLA;
-                syncLabel();
-                await loadDataset(); // swap folders/files + rebuild layers/legend
-              });
-            }, 0);
+            }
+            syncHelp();
+
+            div.addEventListener("change", async (e) => {
+              if (e.target.name === "la") {
+                state.includeLA = e.target.value === "on";
+                syncHelp();
+                await loadDataset(); // swap datasets and recompute scales
+              }
+            });
+
+            L.DomEvent.disableClickPropagation(div);
+            L.DomEvent.disableScrollPropagation(div);
             return div;
           },
         });
@@ -258,9 +317,15 @@
         state.map.addControl(state.legend);
       }
 
+      function maxDecimals(val, n) {
+        const s = val.toFixed(n);
+        return s.replace(/(\.\d*?[1-9])0+$|\.0+$/,'$1');
+      }
+
       function updateLegend() {
         ensureLegend();
-        const [min, max] =
+
+        const [minRaw, maxRaw] =
           state.metric === "CTR" ? state.scales.ctr :
           state.metric === "Clicks" ? state.scales.clicks :
           state.scales.conversions;
@@ -269,16 +334,24 @@
           state.metric + (state.metric === "CTR" ? "" : " (log-scaled)");
 
         document.getElementById("legend-min").textContent =
-          state.metric === "CTR" ? (min * 100).toFixed(1) + "%" : maxDecimals(min, 2);
+          state.metric === "CTR"
+            ? (minRaw * 100).toFixed(1) + "%"
+            : formatCompact(minRaw);
 
         document.getElementById("legend-max").textContent =
-          state.metric === "CTR" ? (max * 100).toFixed(1) + "%" : maxDecimals(max, 2);
+          state.metric === "CTR"
+            ? (maxRaw * 100).toFixed(1) + "%"
+            : formatCompact(maxRaw);
       }
 
-      function maxDecimals(val, n) {
-        // show up to n decimals, but trim trailing zeros
-        const s = val.toFixed(n);
-        return s.replace(/(\.\d*?[1-9])0+$|\.0+$/,'$1');
+      function formatCompact(v) {
+        // Compact formatter for large values (e.g., 12,300 → 12.3K)
+        if (!Number.isFinite(v)) return "—";
+        const abs = Math.abs(v);
+        if (abs >= 1e9)  return (v / 1e9).toFixed(1).replace(/\.0$/,"") + "B";
+        if (abs >= 1e6)  return (v / 1e6).toFixed(1).replace(/\.0$/,"") + "M";
+        if (abs >= 1e3)  return (v / 1e3).toFixed(1).replace(/\.0$/,"") + "K";
+        return maxDecimals(v, 2);
       }
 
       // ----- LABELS -----
@@ -320,15 +393,11 @@
         state.map.on("zoomend", toggleByZoom);
       }
 
-      // -------- dataset loader that respects LA toggle --------
+      // -------- dataset loader that respects LA toggle (Option B) --------
       async function loadDataset() {
-        // 1) metrics (includes ranges used for color scale)
+        // 1) metrics (raw ranges recomputed from dataset)
         state.metrics = await fetchGzipJSON(path("city_metrics", "json.gz"));
-        state.scales = {
-          clicks: state.metrics.ranges.clicks,
-          conversions: state.metrics.ranges.conversions,
-          ctr: state.metrics.ranges.ctr,
-        };
+        state.scales  = computeRangesFromDataset(state.metrics);
 
         // 2) geometry
         const geo = await fetchGzipGeoOrTopoAsGeoJSON(path("regions", "geojson.gz"));
@@ -348,9 +417,8 @@
         labelData = await fetchGzipJSON(path("city_labels", "json.gz"));
         updateLabels();
 
-        // 4) legend
+        // 4) legend + recolor
         updateLegend();
-        // 5) refresh styles for current selections
         rebuildChoropleth();
       }
 
