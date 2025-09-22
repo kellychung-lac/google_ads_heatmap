@@ -122,7 +122,7 @@
         labelLayer: null,
         legend: null,
         showLabels: true,
-        includeLA: (localStorage.getItem("includeLA") ?? "true") === "true", // load persisted setting
+        includeLA: (localStorage.getItem("includeLA") ?? "true") === "true",
       };
 
       // Path helpers
@@ -146,7 +146,6 @@
           const logMin = Math.log10(Math.max(minPos, eps));
           const logMax = Math.log10(Math.max(max, eps));
           const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([logMin, logMax]);
-
           return (v) => {
             const u = (Number.isFinite(v) && v > 0) ? Math.log10(v) : NaN;
             return Number.isFinite(u) ? scale(u).hex() : "#d3d3d3";
@@ -254,7 +253,7 @@
               }
               if (e.target.name === "la") {
                 state.includeLA = e.target.value === "on";
-                localStorage.setItem("includeLA", state.includeLA); // persist setting
+                localStorage.setItem("includeLA", state.includeLA);
                 syncLAHelp();
                 await loadDataset();
               }
