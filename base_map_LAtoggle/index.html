@@ -30,6 +30,8 @@
       }
       .control-card h4 { margin: 4px 0 6px; font-size: 12px; }
       .control-card label { display: block; cursor: pointer; margin: 2px 0; }
+      .control-card .inline { display: inline-flex; gap: 12px; align-items: center; }
+      .control-card small { color: #666; }
 
       .legend {
         background: #fff;
@@ -44,10 +46,6 @@
         background: linear-gradient(to right, #f7fbff, #08306b);
         margin: 4px 0;
       }
-      .legend .row { margin-top: 6px; }
-      .legend .inline { display: inline-flex; gap: 8px; align-items: center; }
-      .legend .group { margin-top: 8px; }
-      .legend .group h4 { margin: 0 0 4px; font-size: 12px; }
 
       .city-label {
         font-weight: 600;
@@ -71,14 +69,13 @@
         return JSON.parse(txt);
       }
 
-      // Accepts either TopoJSON (type="Topology") or GeoJSON
       async function fetchGzipGeoOrTopoAsGeoJSON(url) {
         const obj = await fetchGzipJSON(url);
         if (obj && obj.type === "Topology") {
           const key = Object.keys(obj.objects)[0];
           return topojson.feature(obj, obj.objects[key]);
         }
-        return obj; // already GeoJSON
+        return obj;
       }
 
       function detectCityProp(feature) {
@@ -106,7 +103,6 @@
       }
 
       function computeRangesFromDataset(metrics) {
-        // Raw fields (Option B)
         return {
           clicks:      scanMinMax(metrics, "val_clicks"),
           conversions: scanMinMax(metrics, "val_conversions"),
@@ -117,24 +113,24 @@
       // -------- state --------
       const state = {
         campaign: "ALL",
-        metric: "Clicks", // Clicks | CTR | Conversions
+        metric: "Clicks",
         metrics: null,
-        scales: null,     // { clicks:[min,max], conversions:[min,max], ctr:[min,max] } on raw values
+        scales: null,
         cityProp: null,
         map: null,
         fillLayer: null,
         labelLayer: null,
         legend: null,
         showLabels: true,
-        includeLA: true,  // LA on/off
+        includeLA: (localStorage.getItem("includeLA") ?? "true") === "true", // load persisted setting
       };
 
-      // Path helpers that flip between data/ and data_noLA/, and *_noLA.*
+      // Path helpers
       function baseDir()     { return state.includeLA ? "./data"      : "./data_noLA"; }
       function nameWithSuf(n){ return state.includeLA ? n             : `${n}_noLA`; }
       function path(n, ext)  { return `${baseDir()}/${nameWithSuf(n)}.${ext}`; }
 
-      // Color scale builder (Option B)
+      // Color scale (Option B)
       function getScale(metric) {
         let [min, max] =
           metric === "CTR" ? state.scales.ctr :
@@ -142,11 +138,9 @@
           state.scales.conversions;
 
         if (metric === "CTR") {
-          // Linear [min, max] for CTR (0–1)
           const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([min, max]);
           return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
         } else {
-          // Log scaling for Clicks/Conversions on raw values
           const eps = 1e-9;
           const minPos = (min > 0 ? min : findMinPositive(metric) || eps);
           const logMin = Math.log10(Math.max(minPos, eps));
@@ -175,15 +169,11 @@
       function styleFeature(feat) {
         const city = feat.properties[state.cityProp];
         const rec  = (state.metrics.data[state.campaign] || {})[city] || null;
-
-        // Use RAW values for color (Option B)
         const v =
           state.metric === "CTR"      ? rec?.val_ctr :
           state.metric === "Clicks"   ? rec?.val_clicks :
                                         rec?.val_conversions;
-
         const fill = getScale(state.metric)(v);
-
         return {
           color: "#000",
           weight: 0.4,
@@ -204,10 +194,7 @@
       function onEachFeature(feat, layer) {
         const city = feat.properties[state.cityProp];
         const rec  = (state.metrics.data[state.campaign] || {})[city] || null;
-        layer.bindTooltip(
-          `<b>${city}</b><br>${state.metric}: ${formatValue(rec)}`,
-          { sticky: true, direction: "auto" }
-        );
+        layer.bindTooltip(`<b>${city}</b><br>${state.metric}: ${formatValue(rec)}`, { sticky: true });
       }
 
       function rebuildChoropleth() {
@@ -221,7 +208,6 @@
           options: { position: "topright" },
           onAdd: function () {
             const div = L.DomUtil.create("div", "control-card leaflet-bar");
-
             div.innerHTML = `
               <h4>Campaign</h4>
               ${["ALL", "Display", "Search"].map(
@@ -235,9 +221,21 @@
               <hr/>
               <h4>Labels</h4>
               <label><input type="checkbox" name="labels" ${state.showLabels ? "checked" : ""}/> City Name</label>
+              <hr/>
+              <h4>Los Angeles</h4>
+              <div class="inline">
+                <label><input type="radio" name="la" value="on"  ${state.includeLA ? "checked" : ""}/> On</label>
+                <label><input type="radio" name="la" value="off" ${state.includeLA ? "" : "checked"}/> Off</label>
+              </div>
+              <small id="la-help">${state.includeLA ? "Using ./data/*" : "Using ./data_noLA/*_noLA.*"}</small>
             `;
 
-            div.addEventListener("change", (e) => {
+            function syncLAHelp() {
+              const help = div.querySelector("#la-help");
+              if (help) help.textContent = state.includeLA ? "Using ./data/*" : "Using ./data_noLA/*_noLA.*";
+            }
+
+            div.addEventListener("change", async (e) => {
               if (e.target.name === "camp") {
                 state.campaign = e.target.value;
                 rebuildChoropleth();
@@ -253,6 +251,12 @@
                 state.showLabels = e.target.checked;
                 if (state.showLabels) updateLabels();
                 else clearLabels();
+              }
+              if (e.target.name === "la") {
+                state.includeLA = e.target.value === "on";
+                localStorage.setItem("includeLA", state.includeLA); // persist setting
+                syncLAHelp();
+                await loadDataset();
               }
             });
 
@@ -274,42 +278,7 @@
               <div><b id="legend-title"></b></div>
               <div class="scale"></div>
               <div><span id="legend-min"></span> – <span id="legend-max"></span></div>
-
-              <div class="group">
-                <h4>Los Angeles</h4>
-                <div class="inline">
-                  <label><input type="radio" name="la" value="on"  checked/> On</label>
-                  <label><input type="radio" name="la" value="off" /> Off</label>
-                </div>
-                <div class="row"><small id="la-help"></small></div>
-              </div>
             `;
-
-            // Wire up LA radios
-            const help = div.querySelector("#la-help");
-            function syncHelp() {
-              help.textContent = state.includeLA
-                ? "Using ./data/*"
-                : "Using ./data_noLA/*_noLA.*";
-              const on = div.querySelector('input[name="la"][value="on"]');
-              const off = div.querySelector('input[name="la"][value="off"]');
-              if (on && off) {
-                on.checked = state.includeLA;
-                off.checked = !state.includeLA;
-              }
-            }
-            syncHelp();
-
-            div.addEventListener("change", async (e) => {
-              if (e.target.name === "la") {
-                state.includeLA = e.target.value === "on";
-                syncHelp();
-                await loadDataset(); // swap datasets and recompute scales
-              }
-            });
-
-            L.DomEvent.disableClickPropagation(div);
-            L.DomEvent.disableScrollPropagation(div);
             return div;
           },
         });
@@ -317,132 +286,69 @@
         state.map.addControl(state.legend);
       }
 
-      function maxDecimals(val, n) {
-        const s = val.toFixed(n);
-        return s.replace(/(\.\d*?[1-9])0+$|\.0+$/,'$1');
-      }
-
       function updateLegend() {
         ensureLegend();
-
         const [minRaw, maxRaw] =
           state.metric === "CTR" ? state.scales.ctr :
           state.metric === "Clicks" ? state.scales.clicks :
           state.scales.conversions;
-
         document.getElementById("legend-title").textContent =
           state.metric + (state.metric === "CTR" ? "" : " (log-scaled)");
-
         document.getElementById("legend-min").textContent =
-          state.metric === "CTR"
-            ? (minRaw * 100).toFixed(1) + "%"
-            : formatCompact(minRaw);
-
+          state.metric === "CTR" ? (minRaw * 100).toFixed(1) + "%" : minRaw.toLocaleString();
         document.getElementById("legend-max").textContent =
-          state.metric === "CTR"
-            ? (maxRaw * 100).toFixed(1) + "%"
-            : formatCompact(maxRaw);
-      }
-
-      function formatCompact(v) {
-        // Compact formatter for large values (e.g., 12,300 → 12.3K)
-        if (!Number.isFinite(v)) return "—";
-        const abs = Math.abs(v);
-        if (abs >= 1e9)  return (v / 1e9).toFixed(1).replace(/\.0$/,"") + "B";
-        if (abs >= 1e6)  return (v / 1e6).toFixed(1).replace(/\.0$/,"") + "M";
-        if (abs >= 1e3)  return (v / 1e3).toFixed(1).replace(/\.0$/,"") + "K";
-        return maxDecimals(v, 2);
+          state.metric === "CTR" ? (maxRaw * 100).toFixed(1) + "%" : maxRaw.toLocaleString();
       }
 
       // ----- LABELS -----
       let labelData = null;
-
-      function clearLabels() {
-        if (state.labelLayer) {
-          state.map.removeLayer(state.labelLayer);
-          state.labelLayer = null;
-        }
-      }
-
+      function clearLabels() { if (state.labelLayer) { state.map.removeLayer(state.labelLayer); state.labelLayer = null; } }
       function updateLabels() {
         if (!labelData) return;
         clearLabels();
         if (!state.showLabels) return;
-
         const markers = labelData.map((pt) =>
           L.marker([pt.lat, pt.lon], {
-            icon: L.divIcon({
-              className: "",
-              html: `<div class="city-label">${pt.city}</div>`,
-            }),
+            icon: L.divIcon({ className: "", html: `<div class="city-label">${pt.city}</div>` }),
             interactive: false,
           })
         );
-
         state.labelLayer = L.layerGroup(markers).addTo(state.map);
-
         function toggleByZoom() {
           const z = state.map.getZoom();
           state.labelLayer.getLayers().forEach(
             (m) => (m.getElement().style.display = z >= 7 ? "block" : "none")
           );
         }
-
         toggleByZoom();
         state.map.off("zoomend", toggleByZoom);
         state.map.on("zoomend", toggleByZoom);
       }
 
-      // -------- dataset loader that respects LA toggle (Option B) --------
+      // -------- dataset loader --------
       async function loadDataset() {
-        // 1) metrics (raw ranges recomputed from dataset)
         state.metrics = await fetchGzipJSON(path("city_metrics", "json.gz"));
         state.scales  = computeRangesFromDataset(state.metrics);
-
-        // 2) geometry
         const geo = await fetchGzipGeoOrTopoAsGeoJSON(path("regions", "geojson.gz"));
         state.cityProp = detectCityProp(geo.features[0]);
-
-        // reset/replace layer
-        if (state.fillLayer) {
-          state.map.removeLayer(state.fillLayer);
-          state.fillLayer = null;
-        }
-        state.fillLayer = L.geoJSON(geo, {
-          style: styleFeature,
-          onEachFeature,
-        }).addTo(state.map);
-
-        // 3) labels
+        if (state.fillLayer) { state.map.removeLayer(state.fillLayer); state.fillLayer = null; }
+        state.fillLayer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(state.map);
         labelData = await fetchGzipJSON(path("city_labels", "json.gz"));
         updateLabels();
-
-        // 4) legend + recolor
         updateLegend();
         rebuildChoropleth();
       }
 
       (async function main() {
         state.map = L.map("map").setView([36.7783, -119.4179], 6);
-
         L.tileLayer(
           "https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png",
-          {
-            attribution: "&copy; OpenStreetMap contributors & Carto",
-            maxZoom: 18,
-          }
+          { attribution: "&copy; OpenStreetMap contributors & Carto", maxZoom: 18 }
         ).addTo(state.map);
-
-        // Build controls & legend
         state.map.addControl(makeRadioControl());
         ensureLegend();
-
-        // Initial load with LA included
         await loadDataset();
-      })().catch((err) => {
-        console.error(err);
-        alert(err.message);
-      });
+      })().catch((err) => { console.error(err); alert(err.message); });
     </script>
   </body>
 </html>
