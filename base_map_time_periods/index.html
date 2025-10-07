@@ -67,7 +67,6 @@
         includeLA: (localStorage.getItem("includeLA") ?? "true") === "true",
       };
 
-      // ---- updated paths ----
       function baseDir() {
         return state.includeLA ? "./data_time" : "./data_noLA_noSD_time";
       }
@@ -76,6 +75,20 @@
       }
       function path(n, ext) {
         return `${baseDir()}/${nameWithSuf(n)}.${ext}`;
+      }
+
+      function findGlobalMinPositive(metric) {
+        const key = metric === "Clicks" ? "val_clicks" : "val_conversions";
+        let m = Infinity;
+        for (const period of Object.values(state.periods || {})) {
+          for (const camp of Object.values(period || {})) {
+            for (const rec of Object.values(camp || {})) {
+              const v = rec?.[key];
+              if (Number.isFinite(v) && v > 0 && v < m) m = v;
+            }
+          }
+        }
+        return Number.isFinite(m) ? m : null;
       }
 
       function getScale(metric) {
@@ -89,8 +102,9 @@
           return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
         } else {
           const eps = 1e-9;
-          const minPos = (min > 0 ? min : findMinPositive(metric) || eps);
-          const logMin = Math.log10(Math.max(minPos, eps));
+          const globalMinPos = findGlobalMinPositive(metric) || eps;
+          const minForDomain = min > 0 ? min : globalMinPos;
+          const logMin = Math.log10(Math.max(minForDomain, eps));
           const logMax = Math.log10(Math.max(max, eps));
           const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([logMin, logMax]);
           return (v) => {
@@ -98,17 +112,6 @@
             return Number.isFinite(u) ? scale(u).hex() : "#d3d3d3";
           };
         }
-      }
-
-      function findMinPositive(metric) {
-        const key = metric === "Clicks" ? "val_clicks" : "val_conversions";
-        let minPos = +Infinity;
-        const campBlock = state.metricsPeriod?.[state.campaign] || {};
-        for (const rec of Object.values(campBlock)) {
-          const v = rec?.[key];
-          if (Number.isFinite(v) && v > 0 && v < minPos) minPos = v;
-        }
-        return Number.isFinite(minPos) ? minPos : null;
       }
 
       function styleFeature(feat) {
@@ -219,16 +222,22 @@
 
       function updateLegend() {
         ensureLegend();
-        const [minRaw, maxRaw] =
+        let [minRaw, maxRaw] =
           state.metric === "CTR" ? state.ranges.ctr :
           state.metric === "Clicks" ? state.ranges.clicks :
           state.ranges.conversions;
+
+        if (state.metric !== "CTR" && minRaw <= 0) {
+          const floor = findGlobalMinPositive(state.metric);
+          if (Number.isFinite(floor)) minRaw = floor;
+        }
+
         document.getElementById("legend-title").textContent =
           state.metric + (state.metric === "CTR" ? "" : " (log-scaled)");
         document.getElementById("legend-min").textContent =
-          state.metric === "CTR" ? (minRaw * 100).toFixed(1) + "%" : minRaw.toLocaleString();
+          state.metric === "CTR" ? (minRaw * 100).toFixed(1) + "%" : Math.round(minRaw).toLocaleString();
         document.getElementById("legend-max").textContent =
-          state.metric === "CTR" ? (maxRaw * 100).toFixed(1) + "%" : maxRaw.toLocaleString();
+          state.metric === "CTR" ? (maxRaw * 100).toFixed(1) + "%" : Math.round(maxRaw).toLocaleString();
       }
 
       let labelData = null;
@@ -258,10 +267,12 @@
         state.periods = json.periods || {};
         state.ranges  = json.ranges;
         state.metricsPeriod = state.periods[state.period] || {};
+
         const geo = await fetchGzipGeoOrTopoAsGeoJSON(path("regions", "geojson.gz"));
         state.cityProp = detectCityProp(geo.features[0]);
         if (state.fillLayer) { state.map.removeLayer(state.fillLayer); state.fillLayer = null; }
         state.fillLayer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(state.map);
+
         labelData = await fetchGzipJSON(path("city_labels", "json.gz"));
         updateLabels();
         updateLegend();
