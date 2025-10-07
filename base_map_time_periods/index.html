@@ -67,12 +67,15 @@
         includeLA: (localStorage.getItem("includeLA") ?? "true") === "true",
       };
 
-      // --- updated base paths ---
-      function baseDir() { 
-        return state.includeLA ? "./data_time" : "./data_noLA_noSD_time"; 
+      // ---- updated paths ----
+      function baseDir() {
+        return state.includeLA ? "./data_time" : "./data_noLA_noSD_time";
       }
-      function path(n, ext) { 
-        return `${baseDir()}/${n}.${ext}`; 
+      function nameWithSuf(n) {
+        return state.includeLA ? n : `${n}_noLA_noSD`;
+      }
+      function path(n, ext) {
+        return `${baseDir()}/${nameWithSuf(n)}.${ext}`;
       }
 
       function getScale(metric) {
@@ -112,9 +115,9 @@
         const city = feat.properties[state.cityProp];
         const rec  = (state.metricsPeriod?.[state.campaign] || {})[city] || null;
         const v =
-          state.metric === "CTR"      ? rec?.val_ctr :
-          state.metric === "Clicks"   ? rec?.val_clicks :
-                                        rec?.val_conversions;
+          state.metric === "CTR" ? rec?.val_ctr :
+          state.metric === "Clicks" ? rec?.val_clicks :
+          rec?.val_conversions;
         const fill = getScale(state.metric)(v);
         return { color:"#000", weight:0.4, fillColor:fill, fillOpacity:Number.isFinite(v)?0.75:0.25 };
       }
@@ -145,7 +148,6 @@
           options: { position: "topright" },
           onAdd: function () {
             const div = L.DomUtil.create("div", "control-card leaflet-bar");
-
             div.innerHTML = `
               <h4>Time Range</h4>
               <label><input type="radio" name="period" value="all_2025" ${state.period==="all_2025"?"checked":""}/> All 2025</label>
@@ -165,29 +167,23 @@
               <label><input type="radio" name="la" value="on"  ${state.includeLA ? "checked" : ""}/> On</label>
               <label><input type="radio" name="la" value="off" ${state.includeLA ? "" : "checked"}/> Off</label>
             `;
-
             div.addEventListener("change", async (e) => {
               if (e.target.name === "period") {
                 state.period = e.target.value;
                 state.metricsPeriod = state.periods?.[state.period] || {};
-                rebuildChoropleth();
-                updateLabels();
+                rebuildChoropleth(); updateLabels();
               }
               if (e.target.name === "camp") {
                 state.campaign = e.target.value;
-                rebuildChoropleth();
-                updateLabels();
+                rebuildChoropleth(); updateLabels();
               }
               if (e.target.name === "metric") {
                 state.metric = e.target.value;
-                updateLegend();
-                rebuildChoropleth();
-                updateLabels();
+                updateLegend(); rebuildChoropleth(); updateLabels();
               }
               if (e.target.name === "labels") {
                 state.showLabels = e.target.checked;
-                if (state.showLabels) updateLabels();
-                else clearLabels();
+                if (state.showLabels) updateLabels(); else clearLabels();
               }
               if (e.target.name === "la") {
                 state.includeLA = e.target.value === "on";
@@ -195,7 +191,6 @@
                 await loadDataset();
               }
             });
-
             L.DomEvent.disableClickPropagation(div);
             L.DomEvent.disableScrollPropagation(div);
             return div;
@@ -285,4 +280,3 @@
     </script>
   </body>
 </html>
-
