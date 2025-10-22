@@ -57,7 +57,7 @@
         period: "all_2025",
         periods: null,
         metricsPeriod: null,
-        ranges: null,
+        ranges: null,        // { ctr: [min,max], clicks:[min,max], conversions:[min,max] } for CURRENT slice
         cityProp: null,
         map: null,
         fillLayer: null,
@@ -77,19 +77,47 @@
         return `${baseDir()}/${nameWithSuf(n)}.${ext}`;
       }
 
-      function findGlobalMinPositive(metric) {
+      // --- NEW: compute floors and ranges for the CURRENT period+campaign slice ---
+      function findMinPositiveCurrent(metric) {
         const key = metric === "Clicks" ? "val_clicks" : "val_conversions";
         let m = Infinity;
-        for (const period of Object.values(state.periods || {})) {
-          for (const camp of Object.values(period || {})) {
-            for (const rec of Object.values(camp || {})) {
-              const v = rec?.[key];
-              if (Number.isFinite(v) && v > 0 && v < m) m = v;
-            }
-          }
+        const byCity = (state.metricsPeriod?.[state.campaign]) || {};
+        for (const rec of Object.values(byCity)) {
+          const v = rec?.[key];
+          if (Number.isFinite(v) && v > 0 && v < m) m = v;
         }
         return Number.isFinite(m) ? m : null;
       }
+
+      function recomputeRangesForCurrent() {
+        const byCity = (state.metricsPeriod?.[state.campaign]) || {};
+        let ctrMin = Infinity, ctrMax = -Infinity;
+        let clkMin = Infinity, clkMax = -Infinity;
+        let convMin = Infinity, convMax = -Infinity;
+
+        for (const rec of Object.values(byCity)) {
+          const c = rec?.val_ctr;
+          if (Number.isFinite(c)) { if (c < ctrMin) ctrMin = c; if (c > ctrMax) ctrMax = c; }
+          const k = rec?.val_clicks;
+          if (Number.isFinite(k)) { if (k < clkMin) clkMin = k; if (k > clkMax) clkMax = k; }
+          const v = rec?.val_conversions;
+          if (Number.isFinite(v)) { if (v < convMin) convMin = v; if (v > convMax) convMax = v; }
+        }
+
+        if (!Number.isFinite(ctrMin)) ctrMin = 0;
+        if (!Number.isFinite(ctrMax)) ctrMax = 0;
+        if (!Number.isFinite(clkMin)) clkMin = 0;
+        if (!Number.isFinite(clkMax)) clkMax = 0;
+        if (!Number.isFinite(convMin)) convMin = 0;
+        if (!Number.isFinite(convMax)) convMax = 0;
+
+        state.ranges = {
+          ctr: [ctrMin, ctrMax],
+          clicks: [clkMin, clkMax],
+          conversions: [convMin, convMax],
+        };
+      }
+      // ---------------------------------------------------------------------------
 
       function getScale(metric) {
         let [min, max] =
@@ -102,8 +130,8 @@
           return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
         } else {
           const eps = 1e-9;
-          const globalMinPos = findGlobalMinPositive(metric) || eps;
-          const minForDomain = min > 0 ? min : globalMinPos;
+          const minPos = findMinPositiveCurrent(metric) || eps; // use current slice
+          const minForDomain = min > 0 ? min : minPos;
           const logMin = Math.log10(Math.max(minForDomain, eps));
           const logMax = Math.log10(Math.max(max, eps));
           const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([logMin, logMax]);
@@ -174,11 +202,13 @@
               if (e.target.name === "period") {
                 state.period = e.target.value;
                 state.metricsPeriod = state.periods?.[state.period] || {};
-                rebuildChoropleth(); updateLabels();
+                recomputeRangesForCurrent();
+                updateLegend(); rebuildChoropleth(); updateLabels();
               }
               if (e.target.name === "camp") {
                 state.campaign = e.target.value;
-                rebuildChoropleth(); updateLabels();
+                recomputeRangesForCurrent();
+                updateLegend(); rebuildChoropleth(); updateLabels();
               }
               if (e.target.name === "metric") {
                 state.metric = e.target.value;
@@ -228,7 +258,7 @@
           state.ranges.conversions;
 
         if (state.metric !== "CTR" && minRaw <= 0) {
-          const floor = findGlobalMinPositive(state.metric);
+          const floor = findMinPositiveCurrent(state.metric);
           if (Number.isFinite(floor)) minRaw = floor;
         }
 
@@ -265,8 +295,9 @@
       async function loadDataset() {
         const json = await fetchGzipJSON(path("city_metrics", "json.gz"));
         state.periods = json.periods || {};
-        state.ranges  = json.ranges;
         state.metricsPeriod = state.periods[state.period] || {};
+        // NOTE: ignore json.ranges; we recompute for the current slice:
+        recomputeRangesForCurrent();
 
         const geo = await fetchGzipGeoOrTopoAsGeoJSON(path("regions", "geojson.gz"));
         state.cityProp = detectCityProp(geo.features[0]);
