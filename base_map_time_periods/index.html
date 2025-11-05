@@ -183,7 +183,8 @@
               <h4>Time Range</h4>
               <label><input type="radio" name="period" value="all_2025" ${state.period==="all_2025"?"checked":""}/> All 2025</label>
               <label><input type="radio" name="period" value="jan_apr_2025" ${state.period==="jan_apr_2025"?"checked":""}/> Jan–Apr 2025</label>
-              <label><input type="radio" name="period" value="may_present_2025" ${state.period==="may_present_2025"?"checked":""}/> May–Present</label>
+              <label><input type="radio" name="period" value="may_jul_2025" ${state.period==="may_jul_2025"?"checked":""}/> May–Jul 2025</label>
+              <label><input type="radio" name="period" value="aug_present_2025" ${state.period==="aug_present_2025"?"checked":""}/> Aug–Present</label>
               <hr/>
               <h4>Campaign</h4>
               ${["ALL","Display","Search"].map(c=>`<label><input type="radio" name="camp" value="${c}" ${c===state.campaign?"checked":""}/> ${c}</label>`).join("")}
