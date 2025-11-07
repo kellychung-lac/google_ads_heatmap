@@ -284,135 +284,141 @@
       }
 
       // ---------- controls ----------
-      function renderTimeControlsHTML() {
-        if (state.mode === "absolute") {
-          // Time Range radios (your current behavior)
-          return `
-            <h4>Time Range</h4>
-            ${PERIODS_ORDERED.map(p =>
-              `<label><input type="radio" name="period" value="${p.key}" ${state.period===p.key?"checked":""}/> ${p.label}</label>`
-            ).join("")}
-          `;
-        } else {
-          // Period Pair selector for % Difference
-          const opts = PERIODS_ORDERED.map(p => `<option value="${p.key}">${p.label}</option>`).join("");
-          return `
-            <h4>Period Pair</h4>
-            <div class="inline">
-              <div class="muted">From</div>
-              <select name="periodFrom">${opts}</select>
-            </div>
-            <div class="inline">
-              <div class="muted">To</div>
-              <select name="periodTo">${opts}</select>
-            </div>
-            <script>/* placeholder */</script>
-          `;
+      <script>
+// --- replace these two functions in your file ---
+
+function renderTimeControlsHTML() {
+  if (state.mode === "absolute") {
+    // Build radios without nested template literals
+    let html = '<h4>Time Range</h4>';
+    for (const p of PERIODS_ORDERED) {
+      html += '<label><input type="radio" name="period" value="' + p.key + '" ' +
+              (state.period === p.key ? 'checked' : '') + '/> ' + p.label + '</label>';
+    }
+    return html;
+  } else {
+    // Build selects without nested template literals
+    let opts = '';
+    for (const p of PERIODS_ORDERED) {
+      opts += '<option value="' + p.key + '">' + p.label + '</option>';
+    }
+    return ''
+      + '<h4>Period Pair</h4>'
+      + '<div class="inline"><div class="muted">From</div>'
+      +   '<select name="periodFrom">' + opts + '</select>'
+      + '</div>'
+      + '<div class="inline"><div class="muted">To</div>'
+      +   '<select name="periodTo">' + opts + '</select>'
+      + '</div>';
+  }
+}
+
+function makeControl() {
+  const Control = L.Control.extend({
+    options: { position: "topright" },
+    onAdd: function () {
+      const div = L.DomUtil.create("div", "control-card leaflet-bar");
+
+      // Build the whole panel with plain string concatenation
+      let html = '';
+      html += '<h4>Mode</h4>';
+      html += '<label><input type="radio" name="mode" value="absolute" ' + (state.mode === 'absolute' ? 'checked' : '') + '/> Absolute</label>';
+      html += '<label><input type="radio" name="mode" value="pct" ' + (state.mode === 'pct' ? 'checked' : '') + '/> % Difference</label>';
+      html += '<hr/><div id="time-block">' + renderTimeControlsHTML() + '</div><hr/>';
+
+      html += '<h4>Campaign</h4>';
+      for (const c of ["ALL","Display","Search"]) {
+        html += '<label><input type="radio" name="camp" value="' + c + '" ' + (state.campaign === c ? 'checked' : '') + '/> ' + c + '</label>';
+      }
+      html += '<hr/>';
+
+      html += '<h4>Metric</h4>';
+      for (const m of ["Clicks","CTR","Conversions"]) {
+        html += '<label><input type="radio" name="metric" value="' + m + '" ' + (state.metric === m ? 'checked' : '') + '/> ' + m + '</label>';
+      }
+      html += '<hr/>';
+
+      html += '<h4>Labels</h4>';
+      html += '<label><input type="checkbox" name="labels" ' + (state.showLabels ? 'checked' : '') + '/> City Name</label>';
+      html += '<hr/>';
+
+      html += '<h4>LA + SD</h4>';
+      html += '<label><input type="radio" name="la" value="on" ' + (state.includeLA ? 'checked' : '') + '/> On</label>';
+      html += '<label><input type="radio" name="la" value="off" ' + (!state.includeLA ? 'checked' : '') + '/> Off</label>';
+
+      div.innerHTML = html;
+
+      // Initialize selects when in pct mode
+      function rewireTimeBlockSelects() {
+        const selFrom = div.querySelector('select[name="periodFrom"]');
+        const selTo   = div.querySelector('select[name="periodTo"]');
+        if (selFrom) selFrom.value = state.periodFrom;
+        if (selTo)   selTo.value   = state.periodTo;
+      }
+      rewireTimeBlockSelects();
+
+      div.addEventListener("change", async (e) => {
+        if (e.target.name === "mode") {
+          state.mode = e.target.value;
+
+          if (state.mode === "pct") {
+            const idx = Math.max(0, PERIODS_ORDERED.findIndex(p => p.key === state.period));
+            const from = PERIODS_ORDERED[Math.max(0, idx - 1)]?.key ?? PERIODS_ORDERED[0].key;
+            const to   = PERIODS_ORDERED[idx]?.key ?? PERIODS_ORDERED[0].key;
+            state.periodFrom = from;
+            state.periodTo   = (to === from) ? (PERIODS_ORDERED[idx + 1]?.key ?? to) : to;
+          }
+
+          // Re-render time block and rewire selects
+          const tb = div.querySelector("#time-block");
+          tb.innerHTML = renderTimeControlsHTML();
+          rewireTimeBlockSelects();
+
+          refreshComputationAndRedraw();
         }
-      }
 
-      function makeControl() {
-        const Control = L.Control.extend({
-          options: { position: "topright" },
-          onAdd: function () {
-            const div = L.DomUtil.create("div", "control-card leaflet-bar");
-            div.innerHTML = `
-              <h4>Mode</h4>
-              <label><input type="radio" name="mode" value="absolute" ${state.mode==="absolute"?"checked":""}/> Absolute</label>
-              <label><input type="radio" name="mode" value="pct" ${state.mode==="pct"?"checked":""}/> % Difference</label>
-              <hr/>
-              <div id="time-block">
-                ${renderTimeControlsHTML()}
-              </div>
-              <hr/>
-              <h4>Campaign</h4>
-              ${["ALL","Display","Search"].map(c=>`<label><input type="radio" name="camp" value="${c}" ${c===state.campaign?"checked":""}/> ${c}</label>`).join("")}
-              <hr/>
-              <h4>Metric</h4>
-              ${["Clicks","CTR","Conversions"].map(m=>`<label><input type="radio" name="metric" value="${m}" ${m===state.metric?"checked":""}/> ${m}</label>`).join("")}
-              <hr/>
-              <h4>Labels</h4>
-              <label><input type="checkbox" name="labels" ${state.showLabels ? "checked" : ""}/> City Name</label>
-              <hr/>
-              <h4>LA + SD</h4>
-              <label><input type="radio" name="la" value="on"  ${state.includeLA ? "checked" : ""}/> On</label>
-              <label><input type="radio" name="la" value="off" ${state.includeLA ? "" : "checked"}/> Off</label>
-            `;
+        if (e.target.name === "period") {
+          state.period = e.target.value;
+          state.metricsPeriod = state.periods?.[state.period] || {};
+          recomputeRangesAbsolute();
+          updateLegend(); rebuildChoropleth(); updateLabels();
+        }
 
-            // Wire events
-            function rewireTimeBlockSelects() {
-              // Initialize selects when in pct mode
-              const selFrom = div.querySelector('select[name="periodFrom"]');
-              const selTo   = div.querySelector('select[name="periodTo"]');
-              if (selFrom && selTo) {
-                selFrom.value = state.periodFrom;
-                selTo.value = state.periodTo;
-              }
-            }
-            rewireTimeBlockSelects();
+        if (e.target.name === "periodFrom" || e.target.name === "periodTo") {
+          const selFrom = div.querySelector('select[name="periodFrom"]');
+          const selTo   = div.querySelector('select[name="periodTo"]');
+          state.periodFrom = selFrom.value;
+          state.periodTo   = selTo.value;
+          refreshComputationAndRedraw();
+        }
 
-            div.addEventListener("change", async (e) => {
-              if (e.target.name === "mode") {
-                state.mode = e.target.value;
-                // If switching to pct, make a sensible default pair adjacent to current absolute period
-                if (state.mode === "pct") {
-                  const idx = Math.max(0, PERIODS_ORDERED.findIndex(p=>p.key===state.period));
-                  const from = PERIODS_ORDERED[Math.max(0, idx-1)]?.key ?? PERIODS_ORDERED[0].key;
-                  const to   = PERIODS_ORDERED[idx]?.key ?? PERIODS_ORDERED[0].key;
-                  // prefer forward pair; if same, try next
-                  state.periodFrom = from;
-                  state.periodTo = to === from ? (PERIODS_ORDERED[idx+1]?.key ?? to) : to;
-                }
-                // Re-render time block
-                const tb = div.querySelector("#time-block");
-                tb.innerHTML = renderTimeControlsHTML();
-                // Re-attach default values for selects
-                rewireTimeBlockSelects();
-                // Recompute and redraw
-                refreshComputationAndRedraw();
-              }
+        if (e.target.name === "camp") {
+          state.campaign = e.target.value;
+          refreshComputationAndRedraw();
+        }
+        if (e.target.name === "metric") {
+          state.metric = e.target.value;
+          refreshComputationAndRedraw();
+        }
+        if (e.target.name === "labels") {
+          state.showLabels = e.target.checked;
+          if (state.showLabels) updateLabels(); else clearLabels();
+        }
+        if (e.target.name === "la") {
+          state.includeLA = e.target.value === "on";
+          localStorage.setItem("includeLA", state.includeLA);
+          await loadDataset();
+        }
+      });
 
-              if (e.target.name === "period") {
-                state.period = e.target.value;
-                state.metricsPeriod = state.periods?.[state.period] || {};
-                recomputeRangesAbsolute();
-                updateLegend(); rebuildChoropleth(); updateLabels();
-              }
-
-              if (e.target.name === "periodFrom" || e.target.name === "periodTo") {
-                const selFrom = div.querySelector('select[name="periodFrom"]');
-                const selTo   = div.querySelector('select[name="periodTo"]');
-                state.periodFrom = selFrom.value;
-                state.periodTo   = selTo.value;
-                refreshComputationAndRedraw();
-              }
-
-              if (e.target.name === "camp") {
-                state.campaign = e.target.value;
-                refreshComputationAndRedraw();
-              }
-              if (e.target.name === "metric") {
-                state.metric = e.target.value;
-                refreshComputationAndRedraw();
-              }
-              if (e.target.name === "labels") {
-                state.showLabels = e.target.checked;
-                if (state.showLabels) updateLabels(); else clearLabels();
-              }
-              if (e.target.name === "la") {
-                state.includeLA = e.target.value === "on";
-                localStorage.setItem("includeLA", state.includeLA);
-                await loadDataset(); // reload files for LA/SD on/off
-              }
-            });
-
-            L.DomEvent.disableClickPropagation(div);
-            L.DomEvent.disableScrollPropagation(div);
-            return div;
-          },
-        });
-        return new Control();
-      }
+      L.DomEvent.disableClickPropagation(div);
+      L.DomEvent.disableScrollPropagation(div);
+      return div;
+    },
+  });
+  return new Control();
+}
+</script>
 
       // ---------- legend ----------
       function ensureLegend() {
