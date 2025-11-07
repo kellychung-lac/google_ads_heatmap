@@ -17,7 +17,7 @@
       .control-card h4 { margin:4px 0 6px; font-size:12px; }
       .control-card label { display:block; cursor:pointer; margin:2px 0; }
       .legend { background:#fff; padding:6px 8px; line-height:1.2; box-shadow:0 1px 4px rgba(0,0,0,.2); font:12px/1.2 Arial, sans-serif; }
-      .legend .scale { height:10px; width:180px; background:linear-gradient(to right,#f7fbff,#08306b); margin:4px 0; }
+      .legend .scale { height:10px; width:220px; background:linear-gradient(to right,#f7fbff,#08306b); margin:4px 0; }
       .city-label { font-weight:600; font-size:12px; white-space:nowrap; text-shadow:0 1px 2px rgba(255,255,255,.9); }
       .inline { display:inline-block; margin-right:8px; }
       .muted { color:#666; }
@@ -51,7 +51,7 @@
         const keys = Object.keys(props);
         return keys.length ? keys[0] : "CITY";
       }
-      function sampleGradient(scale, steps=12) {
+      function sampleGradient(scale, steps=16) {
         const arr = [];
         for (let i=0;i<steps;i++) {
           const t = i/(steps-1);
@@ -69,25 +69,19 @@
       ];
 
       const state = {
-        // mode
         mode: "absolute", // "absolute" | "pct"
-        // absolute selections
         period: "all_2025",
-        // pct selections
         periodFrom: "jan_apr_2025",
         periodTo: "may_jul_2025",
 
-        // common selections
         campaign: "ALL",
         metric: "Clicks",
 
-        // data
-        periods: null,        // { periodKey: { campaign: { city: {val_ctr, val_clicks, val_conversions} } } }
-        metricsPeriod: null,  // alias to current absolute slice
-        ranges: null,         // ranges for current visualization
+        periods: null,        // { periodKey: { campaign: { city: {impr_sum, val_ctr, val_clicks, val_conversions} } } }
+        metricsPeriod: null,
+        ranges: null,
         cityProp: null,
 
-        // map/layers/ui
         map: null,
         fillLayer: null,
         labelLayer: null,
@@ -95,6 +89,14 @@
         showLabels: true,
         includeLA: (localStorage.getItem("includeLA") ?? "true") === "true",
       };
+
+      // ---------- % diff gating thresholds (adjust as needed) ----------
+      const THRESHOLDS = {
+        Clicks:       { minClicks: 50,  minImpr: 500 },
+        Conversions:  { minPurch:  5,   minClicks: 30 },
+        CTR:          { minClicks: 100, minImpr: 1000 },
+      };
+      const EPS = 1e-9;
 
       function baseDir() {
         return state.includeLA ? "./data_time" : "./data_noLA_noSD_time";
@@ -132,7 +134,7 @@
         return Number.isFinite(m) ? m : null;
       }
 
-      // Absolute mode: recompute ranges for the selected period+campaign
+      // Absolute mode: recompute ranges for selected period+campaign
       function recomputeRangesAbsolute() {
         const byCity = (state.metricsPeriod?.[state.campaign]) || {};
         let ctrMin=Infinity, ctrMax=-Infinity, clkMin=Infinity, clkMax=-Infinity, convMin=Infinity, convMax=-Infinity;
@@ -153,72 +155,96 @@
         state.ranges = { ctr: [ctrMin, ctrMax], clicks: [clkMin, clkMax], conversions: [convMin, convMax] };
       }
 
-      // Pct mode: compute % diff array and ranges for current campaign+metric+period pair
+      // ---------- % difference (standard) with gates on BOTH periods ----------
+      // %Δ = 100 * (to - from) / |from|
       function computePctDiffByCity() {
-        const eps = 1e-9;
-        const out = {}; // city -> { pct: number | NaN, from, to }
+        const out = {}; // city -> { pct, from, to }
         const dictFrom = currentCitiesCampaignDict(state.periodFrom);
         const dictTo   = currentCitiesCampaignDict(state.periodTo);
+
         const cities = new Set([...Object.keys(dictFrom), ...Object.keys(dictTo)]);
         for (const city of cities) {
-          const vFrom = getMetricValue(dictFrom[city], state.metric);
-          const vTo   = getMetricValue(dictTo[city], state.metric);
-          let pct = NaN;
-          if (Number.isFinite(vFrom) || Number.isFinite(vTo)) {
-            if (Number.isFinite(vFrom) && Math.abs(vFrom) > eps) {
-              pct = ((vTo - vFrom) / Math.max(Math.abs(vFrom), eps)) * 100;
-            } else if (Number.isFinite(vTo) && Math.abs(vTo) > eps) {
-              pct = ((vTo - 0) / eps) * 100; // effectively very large; range will cap
-            } else {
-              pct = NaN; // both ~0 or missing
+          const recFrom = dictFrom[city] || null;
+          const recTo   = dictTo[city]   || null;
+
+          // Main metric values
+          const vFrom = getMetricValue(recFrom, state.metric);
+          const vTo   = getMetricValue(recTo,   state.metric);
+
+          // Gating signals
+          const clicksFrom = recFrom?.val_clicks ?? NaN;
+          const clicksTo   = recTo?.val_clicks   ?? NaN;
+          const convsFrom  = recFrom?.val_conversions ?? NaN;
+          const convsTo    = recTo?.val_conversions   ?? NaN;
+          const imprFrom   = recFrom?.impr_sum ?? NaN;
+          const imprTo     = recTo?.impr_sum   ?? NaN;
+
+          let passes = true;
+          if (state.metric === "Clicks") {
+            const t = THRESHOLDS.Clicks;
+            if (!(Number.isFinite(clicksFrom) && clicksFrom >= t.minClicks &&
+                  Number.isFinite(clicksTo)   && clicksTo   >= t.minClicks &&
+                  Number.isFinite(imprFrom)   && imprFrom   >= t.minImpr &&
+                  Number.isFinite(imprTo)     && imprTo     >= t.minImpr)) {
+              passes = false;
+            }
+          } else if (state.metric === "Conversions") {
+            const t = THRESHOLDS.Conversions;
+            if (!(Number.isFinite(convsFrom) && convsFrom >= t.minPurch &&
+                  Number.isFinite(convsTo)   && convsTo   >= t.minPurch &&
+                  Number.isFinite(clicksFrom) && clicksFrom >= t.minClicks &&
+                  Number.isFinite(clicksTo)   && clicksTo   >= t.minClicks)) {
+              passes = false;
+            }
+          } else if (state.metric === "CTR") {
+            const t = THRESHOLDS.CTR;
+            if (!(Number.isFinite(clicksFrom) && clicksFrom >= t.minClicks &&
+                  Number.isFinite(clicksTo)   && clicksTo   >= t.minClicks &&
+                  Number.isFinite(imprFrom)   && imprFrom   >= t.minImpr &&
+                  Number.isFinite(imprTo)     && imprTo     >= t.minImpr)) {
+              passes = false;
             }
           }
-          out[city] = { pct, from:vFrom, to:vTo };
+
+          let pct = NaN;
+          if (passes && Number.isFinite(vFrom) && Number.isFinite(vTo) && Math.abs(vFrom) > EPS) {
+            pct = ((vTo - vFrom) / Math.abs(vFrom)) * 100;
+          }
+
+          out[city] = { pct, from: vFrom, to: vTo };
         }
         return out;
       }
 
+      // Use actual min/max (not forced symmetric)
       function recomputeRangesPct(pctDict) {
-        let min=Infinity, max=-Infinity;
+        let min = Infinity, max = -Infinity;
         for (const { pct } of Object.values(pctDict)) {
           if (Number.isFinite(pct)) {
-            min = Math.min(min, pct);
-            max = Math.max(max, pct);
+            if (pct < min) min = pct;
+            if (pct > max) max = pct;
           }
         }
         if (!Number.isFinite(min) || !Number.isFinite(max)) { min = 0; max = 0; }
-        const M = Math.max(Math.abs(min), Math.abs(max));
-        state.ranges = { pct: [-M, M] }; // symmetric diverging
+        state.ranges = { pct: [min, max] };
       }
 
-      // ---------- scales ----------
-      function getScaleAbsolute(metric) {
-        let [min, max] =
-          metric === "CTR" ? state.ranges.ctr :
-          metric === "Clicks" ? state.ranges.clicks :
-          state.ranges.conversions;
-
-        if (metric === "CTR") {
-          const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([min, max]);
-          return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
-        } else {
-          const eps = 1e-9;
-          const minPos = findMinPositiveCurrent(metric) || eps; // current slice only
-          const minForDomain = min > 0 ? min : minPos;
-          const logMin = Math.log10(Math.max(minForDomain, eps));
-          const logMax = Math.log10(Math.max(max, eps));
-          const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([logMin, logMax]);
-          return (v) => {
-            const u = (Number.isFinite(v) && v > 0) ? Math.log10(v) : NaN;
-            return Number.isFinite(u) ? scale(u).hex() : "#d3d3d3";
-          };
-        }
-      }
-
+      // Adaptive color scale: diverging if crosses 0, else sequential
       function getScalePct() {
-        const [min,max] = state.ranges.pct; // [-M, M]
-        const domain = [min, 0, max];
-        const scale = chroma.scale(["#67000d","#f7f7f7","#08306b"]).domain(domain);
+        const [min, max] = state.ranges.pct;
+
+        if (min < 0 && max > 0) {
+          // Diverging around 0
+          const scale = chroma.scale(["#67000d", "#f7f7f7", "#08306b"]).domain([min, 0, max]);
+          return (pct) => (Number.isFinite(pct) ? scale(pct).hex() : "#d3d3d3");
+        }
+        if (max <= 0) {
+          // All non-positive: red (more negative) -> neutral
+          const scale = chroma.scale(["#67000d", "#f7f7f7"]).domain([min, 0]);
+          return (pct) => (Number.isFinite(pct) ? scale(pct).hex() : "#d3d3d3");
+        }
+        // All non-negative: neutral -> blue
+        const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([0, max]);
         return (pct) => (Number.isFinite(pct) ? scale(pct).hex() : "#d3d3d3");
       }
 
@@ -239,6 +265,29 @@
           const info = pctCache?.[city] || { pct: NaN };
           const fill = getScalePct()(info.pct);
           return { color:"#000", weight:0.4, fillColor:fill, fillOpacity:Number.isFinite(info.pct)?0.75:0.25 };
+        }
+      }
+
+      function getScaleAbsolute(metric) {
+        let [min, max] =
+          metric === "CTR" ? state.ranges.ctr :
+          metric === "Clicks" ? state.ranges.clicks :
+          state.ranges.conversions;
+
+        if (metric === "CTR") {
+          const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([min, max]);
+          return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
+        } else {
+          const eps = 1e-9;
+          const minPos = findMinPositiveCurrent(metric) || eps; // current slice only
+          const minForDomain = min > 0 ? min : minPos;
+          const logMin = Math.log10(Math.max(minForDomain, eps));
+          const logMax = Math.log10(Math.max(max, eps));
+          const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([logMin, logMax]);
+          return (v) => {
+            const u = (Number.isFinite(v) && v > 0) ? Math.log10(v) : NaN;
+            return Number.isFinite(u) ? scale(u).hex() : "#d3d3d3";
+          };
         }
       }
 
@@ -444,7 +493,6 @@
           elMin.textContent   = state.metric === "CTR" ? (minRaw*100).toFixed(1) + "%" : Math.round(minRaw).toLocaleString();
           elMax.textContent   = state.metric === "CTR" ? (maxRaw*100).toFixed(1) + "%" : Math.round(maxRaw).toLocaleString();
 
-          // Gradient preview (visual only)
           const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([0,1]);
           elScale.style.background = sampleGradient(scale);
         } else {
@@ -453,8 +501,16 @@
           elMin.textContent   = `${min.toFixed(1)}%`;
           elMax.textContent   = `${max.toFixed(1)}%`;
 
-          const diverge = chroma.scale(["#67000d","#f7f7f7","#08306b"]).domain([0,0.5,1]); // preview gradient
-          elScale.style.background = sampleGradient(diverge);
+          // Preview gradient matches adaptive scale
+          let previewScale;
+          if (min < 0 && max > 0) {
+            previewScale = chroma.scale(["#67000d","#f7f7f7","#08306b"]).domain([0,0.5,1]);
+          } else if (max <= 0) {
+            previewScale = chroma.scale(["#67000d","#f7f7f7"]).domain([0,1]);
+          } else {
+            previewScale = chroma.scale(["#f7fbff","#08306b"]).domain([0,1]);
+          }
+          elScale.style.background = sampleGradient(previewScale);
         }
       }
 
