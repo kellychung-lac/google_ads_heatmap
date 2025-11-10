@@ -67,6 +67,8 @@
         { key:"may_jul_2025",     label:"May–Jul 2025" },
         { key:"aug_present_2025", label:"Aug–Present" }
       ];
+      // For % Difference, exclude "All 2025"
+      const PERIODS_PCT = PERIODS_ORDERED.filter(p => p.key !== "all_2025");
 
       const state = {
         mode: "absolute", // "absolute" | "pct"
@@ -94,7 +96,7 @@
       const THRESHOLDS = {
         Clicks:       { minClicks: 25,  minImpr: 100 },
         Conversions:  { minPurch:  5,   minClicks: 25 },
-        CTR:          { minClicks: 25, minImpr: 100 },
+        CTR:          { minClicks: 25,  minImpr: 100 },
       };
       const EPS = 1e-9;
 
@@ -314,8 +316,8 @@
           layer.bindTooltip(`<b>${city}</b><br>${state.metric}: ${formatValueAbsolute(rec)}`, { sticky: true });
         } else {
           const info = pctCache?.[city] || null;
-          const tFrom = PERIODS_ORDERED.find(p=>p.key===state.periodFrom)?.label ?? state.periodFrom;
-          const tTo   = PERIODS_ORDERED.find(p=>p.key===state.periodTo)?.label ?? state.periodTo;
+          const tFrom = PERIODS_PCT.find(p=>p.key===state.periodFrom)?.label ?? state.periodFrom;
+          const tTo   = PERIODS_PCT.find(p=>p.key===state.periodTo)?.label ?? state.periodTo;
           const val = formatValuePct(info);
           layer.bindTooltip(
             `<b>${city}</b><br>${state.metric} %Δ (${tFrom} → ${tTo}): ${val}`,
@@ -341,7 +343,7 @@
           return html;
         } else {
           let opts = '';
-          for (const p of PERIODS_ORDERED) {
+          for (const p of PERIODS_PCT) {
             opts += '<option value="' + p.key + '">' + p.label + '</option>';
           }
           return ''
@@ -402,11 +404,17 @@
                 state.mode = e.target.value;
 
                 if (state.mode === "pct") {
-                  const idx = Math.max(0, PERIODS_ORDERED.findIndex(p => p.key === state.period));
-                  const from = PERIODS_ORDERED[Math.max(0, idx - 1)]?.key ?? PERIODS_ORDERED[0].key;
-                  const to   = PERIODS_ORDERED[idx]?.key ?? PERIODS_ORDERED[0].key;
-                  state.periodFrom = from;
-                  state.periodTo   = (to === from) ? (PERIODS_ORDERED[idx + 1]?.key ?? to) : to;
+                  const ordered = PERIODS_PCT;
+                  // Try to anchor around current absolute period; if not found, use first two
+                  let idx = ordered.findIndex(p => p.key === state.period);
+                  if (idx < 0) idx = 0;
+                  const from = ordered[Math.max(0, idx - 1)]?.key ?? ordered[0]?.key;
+                  let to     = ordered[Math.min(idx, ordered.length - 1)]?.key ?? ordered[0]?.key;
+                  if (to === from && ordered.length > 1) {
+                    to = ordered[Math.min(idx + 1, ordered.length - 1)].key;
+                  }
+                  state.periodFrom = from || ordered[0]?.key;
+                  state.periodTo   = to   || ordered[1]?.key || state.periodFrom;
                 }
 
                 const tb = div.querySelector("#time-block");
