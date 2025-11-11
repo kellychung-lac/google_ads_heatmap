@@ -21,6 +21,7 @@
       .city-label { font-weight:600; font-size:12px; white-space:nowrap; text-shadow:0 1px 2px rgba(255,255,255,.9); }
       .inline { display:inline-block; margin-right:8px; }
       .muted { color:#666; }
+      .note { margin-top: 6px; font-size:11px; line-height:1.5;}
     </style>
   </head>
 
@@ -368,6 +369,7 @@
             html += '<label><input type="radio" name="mode" value="absolute" ' + (state.mode === 'absolute' ? 'checked' : '') + '/> Absolute</label>';
             html += '<label><input type="radio" name="mode" value="pct" ' + (state.mode === 'pct' ? 'checked' : '') + '/> % Difference</label>';
             html += '<hr/><div id="time-block">' + renderTimeControlsHTML() + '</div><hr/>';
+            html += '<div id="pct-note" class="note muted" style="display:none">
 
             html += '<h4>Campaign</h4>';
             for (const c of ["ALL","Display","Search"]) {
@@ -398,6 +400,20 @@
               if (selTo)   selTo.value   = state.periodTo;
             }
             rewireTimeBlockSelects();
+            updatePctNote();
+
+            function updatePctNote() {
+              const el = div.querySelector('#pct-note');
+              if (!el) return;
+              if (state.mode === 'pct') {
+                el.style.display = 'block';
+                el.innerHTML = 'Note: Cities that do not meet data gates are shown as neutral. ' +
+                               'Clicks: 25 Clicks, 100 Impressions' +
+                               'Conversions: 5 Purchases, 25 Clicks' +
+                               'CTR: 25 CLicks, 100 Impressions';
+              } else {
+                el.style.display = 'none';
+                el.textContent = '';}}
 
             div.addEventListener("change", async (e) => {
               if (e.target.name === "mode") {
@@ -420,7 +436,7 @@
                 const tb = div.querySelector("#time-block");
                 tb.innerHTML = renderTimeControlsHTML();
                 rewireTimeBlockSelects();
-
+                updatePctNote();
                 refreshComputationAndRedraw();
               }
 
