@@ -1,0 +1,614 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>California Cities Heatmap</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/topojson-client@3"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chroma-js@2.4.2/chroma.min.js"></script>
+
+    <style>
+      html, body, #map { height: 100%; margin: 0; }
+      .control-card { background:#fff; padding:8px 10px; font:12px/1.2 Arial, sans-serif; box-shadow:0 1px 4px rgba(0,0,0,.2); }
+      .control-card h4 { margin:4px 0 6px; font-size:12px; }
+      .control-card label { display:block; cursor:pointer; margin:2px 0; }
+      .legend { background:#fff; padding:6px 8px; line-height:1.2; box-shadow:0 1px 4px rgba(0,0,0,.2); font:12px/1.2 Arial, sans-serif; }
+      .legend .scale { height:10px; width:220px; background:linear-gradient(to right,#f7fbff,#08306b); margin:4px 0; }
+      .city-label { font-weight:600; font-size:12px; white-space:nowrap; text-shadow:0 1px 2px rgba(255,255,255,.9); }
+      .inline { display:inline-block; margin-right:8px; }
+      .muted { color:#666; }
+      .note { margin-top:6px; font-size:11px; line-height:1.3; }
+    </style>
+  </head>
+
+  <body>
+    <div id="map"></div>
+
+    <script>
+      // ---------- utils ----------
+      async function fetchGzipJSON(url) {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(`Fetch ${url}: ${r.status}`);
+        const ab = await r.arrayBuffer();
+        const txt = pako.ungzip(new Uint8Array(ab), { to: "string" });
+        return JSON.parse(txt);
+      }
+      async function fetchGzipGeoOrTopoAsGeoJSON(url) {
+        const obj = await fetchGzipJSON(url);
+        if (obj && obj.type === "Topology") {
+          const key = Object.keys(obj.objects)[0];
+          return topojson.feature(obj, obj.objects[key]);
+        }
+        return obj;
+      }
+      function detectCityProp(feature) {
+        const props = feature?.properties || {};
+        const cands = ["CITY","City","city","NAME","Name","name","PLACENAME","PLACENAM"];
+        for (const k of cands) if (k in props) return k;
+        const keys = Object.keys(props);
+        return keys.length ? keys[0] : "CITY";
+      }
+      function sampleGradient(scale, steps=16) {
+        const arr = [];
+        for (let i=0;i<steps;i++) {
+          const t = i/(steps-1);
+          arr.push(scale(t).hex());
+        }
+        return `linear-gradient(to right, ${arr.join(",")})`;
+      }
+
+      // ---------- state ----------
+      const PERIODS_ORDERED = [
+        { key:"all_2025",         label:"All 2025" },
+        { key:"jan_apr_2025",     label:"Jan–Apr 2025" },
+        { key:"may_jul_2025",     label:"May–Jul 2025" },
+        { key:"aug_present_2025", label:"Aug–Present" }
+      ];
+      // For % Difference, exclude "All 2025"
+      const PERIODS_PCT = PERIODS_ORDERED.filter(p => p.key !== "all_2025");
+
+      const state = {
+        mode: "absolute", // "absolute" | "pct"
+        period: "all_2025",
+        periodFrom: "jan_apr_2025",
+        periodTo: "may_jul_2025",
+
+        campaign: "ALL",
+        metric: "Clicks",
+
+        periods: null,        // { periodKey: { campaign: { city: {impr_sum, val_ctr, val_clicks, val_conversions} } } }
+        metricsPeriod: null,
+        ranges: null,
+        cityProp: null,
+
+        map: null,
+        fillLayer: null,
+        labelLayer: null,
+        legend: null,
+        showLabels: true,
+        includeLA: (localStorage.getItem("includeLA") ?? "true") === "true",
+      };
+
+      // ---------- % diff gating thresholds (adjust as needed) ----------
+      const THRESHOLDS = {
+        Clicks:       { minClicks: 25,  minImpr: 100 },
+        Conversions:  { minPurch:  5,   minClicks: 25 },
+        CTR:          { minClicks: 25,  minImpr: 100 },
+      };
+      const EPS = 1e-9;
+
+      function baseDir() {
+        return state.includeLA ? "./data_time" : "./data_noLA_noSD_time";
+      }
+      function nameWithSuf(n) {
+        return state.includeLA ? n : `${n}_noLA_noSD`;
+      }
+      function path(n, ext) {
+        return `${baseDir()}/${nameWithSuf(n)}.${ext}`;
+      }
+
+      // ---------- range computations ----------
+      function getRecord(periodKey, campaign, city) {
+        return state.periods?.[periodKey]?.[campaign]?.[city] || null;
+      }
+      function currentCitiesCampaignDict(periodKey) {
+        return state.periods?.[periodKey]?.[state.campaign] || {};
+      }
+      function getMetricValue(rec, metric) {
+        if (!rec) return NaN;
+        if (metric === "CTR") return rec.val_ctr;
+        if (metric === "Clicks") return rec.val_clicks;
+        return rec.val_conversions;
+      }
+
+      function findMinPositiveCurrent(metric) {
+        // Only used in absolute mode for Clicks/Conversions
+        const key = metric === "Clicks" ? "val_clicks" : "val_conversions";
+        let m = Infinity;
+        const byCity = (state.metricsPeriod?.[state.campaign]) || {};
+        for (const rec of Object.values(byCity)) {
+          const v = rec?.[key];
+          if (Number.isFinite(v) && v > 0 && v < m) m = v;
+        }
+        return Number.isFinite(m) ? m : null;
+      }
+
+      // Absolute mode: recompute ranges for selected period+campaign
+      function recomputeRangesAbsolute() {
+        const byCity = (state.metricsPeriod?.[state.campaign]) || {};
+        let ctrMin=Infinity, ctrMax=-Infinity, clkMin=Infinity, clkMax=-Infinity, convMin=Infinity, convMax=-Infinity;
+
+        for (const rec of Object.values(byCity)) {
+          const c = rec?.val_ctr;
+          if (Number.isFinite(c)) { ctrMin = Math.min(ctrMin, c); ctrMax = Math.max(ctrMax, c); }
+          const k = rec?.val_clicks;
+          if (Number.isFinite(k)) { clkMin = Math.min(clkMin, k); clkMax = Math.max(clkMax, k); }
+          const v = rec?.val_conversions;
+          if (Number.isFinite(v)) { convMin = Math.min(convMin, v); convMax = Math.max(convMax, v); }
+        }
+
+        if (!Number.isFinite(ctrMin)) ctrMin = ctrMax = 0;
+        if (!Number.isFinite(clkMin)) clkMin = clkMax = 0;
+        if (!Number.isFinite(convMin)) convMin = convMax = 0;
+
+        state.ranges = { ctr: [ctrMin, ctrMax], clicks: [clkMin, clkMax], conversions: [convMin, convMax] };
+      }
+
+      // ---------- % difference (standard) with gates on BOTH periods ----------
+      // %Δ = 100 * (to - from) / |from|
+      function computePctDiffByCity() {
+        const out = {}; // city -> { pct, from, to }
+        const dictFrom = currentCitiesCampaignDict(state.periodFrom);
+        const dictTo   = currentCitiesCampaignDict(state.periodTo);
+
+        const cities = new Set([...Object.keys(dictFrom), ...Object.keys(dictTo)]);
+        for (const city of cities) {
+          const recFrom = dictFrom[city] || null;
+          const recTo   = dictTo[city]   || null;
+
+          // Main metric values
+          const vFrom = getMetricValue(recFrom, state.metric);
+          const vTo   = getMetricValue(recTo,   state.metric);
+
+          // Gating signals
+          const clicksFrom = recFrom?.val_clicks ?? NaN;
+          const clicksTo   = recTo?.val_clicks   ?? NaN;
+          const convsFrom  = recFrom?.val_conversions ?? NaN;
+          const convsTo    = recTo?.val_conversions   ?? NaN;
+          const imprFrom   = recFrom?.impr_sum ?? NaN;
+          const imprTo     = recTo?.impr_sum   ?? NaN;
+
+          let passes = true;
+          if (state.metric === "Clicks") {
+            const t = THRESHOLDS.Clicks;
+            if (!(Number.isFinite(clicksFrom) && clicksFrom >= t.minClicks &&
+                  Number.isFinite(clicksTo)   && clicksTo   >= t.minClicks &&
+                  Number.isFinite(imprFrom)   && imprFrom   >= t.minImpr &&
+                  Number.isFinite(imprTo)     && imprTo     >= t.minImpr)) {
+              passes = false;
+            }
+          } else if (state.metric === "Conversions") {
+            const t = THRESHOLDS.Conversions;
+            if (!(Number.isFinite(convsFrom) && convsFrom >= t.minPurch &&
+                  Number.isFinite(convsTo)   && convsTo   >= t.minPurch &&
+                  Number.isFinite(clicksFrom) && clicksFrom >= t.minClicks &&
+                  Number.isFinite(clicksTo)   && clicksTo   >= t.minClicks)) {
+              passes = false;
+            }
+          } else if (state.metric === "CTR") {
+            const t = THRESHOLDS.CTR;
+            if (!(Number.isFinite(clicksFrom) && clicksFrom >= t.minClicks &&
+                  Number.isFinite(clicksTo)   && clicksTo   >= t.minClicks &&
+                  Number.isFinite(imprFrom)   && imprFrom   >= t.minImpr &&
+                  Number.isFinite(imprTo)     && imprTo     >= t.minImpr)) {
+              passes = false;
+            }
+          }
+
+          let pct = NaN;
+          if (passes && Number.isFinite(vFrom) && Number.isFinite(vTo) && Math.abs(vFrom) > EPS) {
+            pct = ((vTo - vFrom) / Math.abs(vFrom)) * 100;
+          }
+
+          out[city] = { pct, from: vFrom, to: vTo };
+        }
+        return out;
+      }
+
+      // Use actual min/max (not forced symmetric)
+      function recomputeRangesPct(pctDict) {
+        let min = Infinity, max = -Infinity;
+        for (const { pct } of Object.values(pctDict)) {
+          if (Number.isFinite(pct)) {
+            if (pct < min) min = pct;
+            if (pct > max) max = pct;
+          }
+        }
+        if (!Number.isFinite(min) || !Number.isFinite(max)) { min = 0; max = 0; }
+        state.ranges = { pct: [min, max] };
+      }
+
+      // Adaptive color scale: diverging if crosses 0, else sequential
+      function getScalePct() {
+        const [min, max] = state.ranges.pct;
+
+        if (min < 0 && max > 0) {
+          // Diverging around 0
+          const scale = chroma.scale(["#67000d", "#f7f7f7", "#08306b"]).domain([min, 0, max]);
+          return (pct) => (Number.isFinite(pct) ? scale(pct).hex() : "#d3d3d3");
+        }
+        if (max <= 0) {
+          // All non-positive: red (more negative) -> neutral
+          const scale = chroma.scale(["#67000d", "#f7f7f7"]).domain([min, 0]);
+          return (pct) => (Number.isFinite(pct) ? scale(pct).hex() : "#d3d3d3");
+        }
+        // All non-negative: neutral -> blue
+        const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([0, max]);
+        return (pct) => (Number.isFinite(pct) ? scale(pct).hex() : "#d3d3d3");
+      }
+
+      // ---------- feature styling / tooltip ----------
+      let pctCache = null; // city -> {pct, from, to}
+
+      function styleFeature(feat) {
+        const city = feat.properties[state.cityProp];
+        if (state.mode === "absolute") {
+          const rec  = (state.metricsPeriod?.[state.campaign] || {})[city] || null;
+          const v =
+            state.metric === "CTR" ? rec?.val_ctr :
+            state.metric === "Clicks" ? rec?.val_clicks :
+            rec?.val_conversions;
+          const fill = getScaleAbsolute(state.metric)(v);
+          return { color:"#000", weight:0.4, fillColor:fill, fillOpacity:Number.isFinite(v)?0.75:0.25 };
+        } else {
+          const info = pctCache?.[city] || { pct: NaN };
+          const fill = getScalePct()(info.pct);
+          return { color:"#000", weight:0.4, fillColor:fill, fillOpacity:Number.isFinite(info.pct)?0.75:0.25 };
+        }
+      }
+
+      function getScaleAbsolute(metric) {
+        let [min, max] =
+          metric === "CTR" ? state.ranges.ctr :
+          metric === "Clicks" ? state.ranges.clicks :
+          state.ranges.conversions;
+
+        if (metric === "CTR") {
+          const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([min, max]);
+          return (v) => (Number.isFinite(v) ? scale(v).hex() : "#d3d3d3");
+        } else {
+          const eps = 1e-9;
+          const minPos = findMinPositiveCurrent(metric) || eps; // current slice only
+          const minForDomain = min > 0 ? min : minPos;
+          const logMin = Math.log10(Math.max(minForDomain, eps));
+          const logMax = Math.log10(Math.max(max, eps));
+          const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([logMin, logMax]);
+          return (v) => {
+            const u = (Number.isFinite(v) && v > 0) ? Math.log10(v) : NaN;
+            return Number.isFinite(u) ? scale(u).hex() : "#d3d3d3";
+          };
+        }
+      }
+
+      function formatValueAbsolute(rec) {
+        if (!rec) return "—";
+        if (state.metric === "CTR")
+          return Number.isFinite(rec.val_ctr) ? (rec.val_ctr * 100).toFixed(2) + "%" : "—";
+        if (state.metric === "Clicks")
+          return Number.isFinite(rec.val_clicks) ? Math.round(rec.val_clicks).toLocaleString() : "—";
+        return Number.isFinite(rec.val_conversions) ? Math.round(rec.val_conversions).toLocaleString() : "—";
+      }
+
+      function formatValuePct(info) {
+        if (!info) return "—";
+        if (!Number.isFinite(info.pct)) return "—";
+        const s = info.pct >= 0 ? "+" : "";
+        return s + info.pct.toFixed(2) + "%";
+      }
+
+      function onEachFeature(feat, layer) {
+        const city = feat.properties[state.cityProp];
+        if (state.mode === "absolute") {
+          const rec  = (state.metricsPeriod?.[state.campaign] || {})[city] || null;
+          layer.bindTooltip(`<b>${city}</b><br>${state.metric}: ${formatValueAbsolute(rec)}`, { sticky: true });
+        } else {
+          const info = pctCache?.[city] || null;
+          const tFrom = PERIODS_PCT.find(p=>p.key===state.periodFrom)?.label ?? state.periodFrom;
+          const tTo   = PERIODS_PCT.find(p=>p.key===state.periodTo)?.label ?? state.periodTo;
+          const val = formatValuePct(info);
+          layer.bindTooltip(
+            `<b>${city}</b><br>${state.metric} %Δ (${tFrom} → ${tTo}): ${val}`,
+            { sticky: true }
+          );
+        }
+      }
+
+      function rebuildChoropleth() {
+        if (!state.fillLayer) return;
+        state.fillLayer.setStyle(styleFeature);
+        state.fillLayer.eachLayer((l) => onEachFeature(l.feature, l));
+      }
+
+      // ---------- controls ----------
+      function renderTimeControlsHTML() {
+        if (state.mode === "absolute") {
+          let html = '<h4>Time Range</h4>';
+          for (const p of PERIODS_ORDERED) {
+            html += '<label><input type="radio" name="period" value="' + p.key + '" ' +
+                    (state.period === p.key ? 'checked' : '') + '/> ' + p.label + '</label>';
+          }
+          return html;
+        } else {
+          let opts = '';
+          for (const p of PERIODS_PCT) {
+            opts += '<option value="' + p.key + '">' + p.label + '</option>';
+          }
+          return ''
+            + '<h4>Period Pair</h4>'
+            + '<div class="inline"><div class="muted">From</div>'
+            +   '<select name="periodFrom">' + opts + '</select>'
+            + '</div>'
+            + '<div class="inline"><div class="muted">To</div>'
+            +   '<select name="periodTo">' + opts + '</select>'
+            + '</div>';
+        }
+      }
+
+      function makeControl() {
+        const Control = L.Control.extend({
+          options: { position: "topright" },
+          onAdd: function () {
+            const div = L.DomUtil.create("div", "control-card leaflet-bar");
+
+            let html = '';
+            html += '<h4>Mode</h4>';
+            html += '<label><input type="radio" name="mode" value="absolute" ' + (state.mode === 'absolute' ? 'checked' : '') + '/> Absolute</label>';
+            html += '<label><input type="radio" name="mode" value="pct" ' + (state.mode === 'pct' ? 'checked' : '') + '/> % Difference</label>';
+            // time controls + pct note block right below
+            html += '<hr/><div id="time-block">' + renderTimeControlsHTML() + '</div>';
+            html += '<div id="pct-note" class="note muted" style="display:none"></div>';
+            html += '<hr/>';
+
+            html += '<h4>Campaign</h4>';
+            for (const c of ["ALL","Display","Search"]) {
+              html += '<label><input type="radio" name="camp" value="' + c + '" ' + (state.campaign === c ? 'checked' : '') + '/> ' + c + '</label>';
+            }
+            html += '<hr/>';
+
+            html += '<h4>Metric</h4>';
+            for (const m of ["Clicks","CTR","Conversions"]) {
+              html += '<label><input type="radio" name="metric" value="' + m + '" ' + (state.metric === m ? 'checked' : '') + '/> ' + m + '</label>';
+            }
+            html += '<hr/>';
+
+            html += '<h4>Labels</h4>';
+            html += '<label><input type="checkbox" name="labels" ' + (state.showLabels ? 'checked' : '') + '/> City Name</label>';
+            html += '<hr/>';
+
+            html += '<h4>LA + SD</h4>';
+            html += '<label><input type="radio" name="la" value="on" ' + (state.includeLA ? 'checked' : '') + '/> On</label>';
+            html += '<label><input type="radio" name="la" value="off" ' + (!state.includeLA ? 'checked' : '') + '/> Off</label>';
+
+            div.innerHTML = html;
+
+            function rewireTimeBlockSelects() {
+              const selFrom = div.querySelector('select[name="periodFrom"]');
+              const selTo   = div.querySelector('select[name="periodTo"]');
+              if (selFrom) selFrom.value = state.periodFrom;
+              if (selTo)   selTo.value   = state.periodTo;
+            }
+            rewireTimeBlockSelects();
+
+            // --- show/hide and set the % note text based on mode ---
+            function updatePctNote() {
+              const el = div.querySelector('#pct-note');
+              if (!el) return;
+              if (state.mode === 'pct') {
+                el.style.display = 'block';
+                el.innerHTML = '<b>NOTE: CITIES APPEAR NEUTRAL</b><br>' +
+                               '<b>IF REQs NOT MET</b><br>' +
+                               'Clicks: 25 Clicks, 100 Impressions<br>' +
+                               'Conversions: 25 Clicks, 5 Purchases<br>' +
+                               'CTR: 25 Clicks, 100 Impressions';
+              } else {
+                el.style.display = 'none';
+                el.textContent = '';
+              }
+            }
+            updatePctNote();
+
+            div.addEventListener("change", async (e) => {
+              if (e.target.name === "mode") {
+                state.mode = e.target.value;
+
+                if (state.mode === "pct") {
+                  const ordered = PERIODS_PCT;
+                  // Try to anchor around current absolute period; if not found, use first two
+                  let idx = ordered.findIndex(p => p.key === state.period);
+                  if (idx < 0) idx = 0;
+                  const from = ordered[Math.max(0, idx - 1)]?.key ?? ordered[0]?.key;
+                  let to     = ordered[Math.min(idx, ordered.length - 1)]?.key ?? ordered[0]?.key;
+                  if (to === from && ordered.length > 1) {
+                    to = ordered[Math.min(idx + 1, ordered.length - 1)].key;
+                  }
+                  state.periodFrom = from || ordered[0]?.key;
+                  state.periodTo   = to   || ordered[1]?.key || state.periodFrom;
+                }
+
+                const tb = div.querySelector("#time-block");
+                tb.innerHTML = renderTimeControlsHTML();
+                rewireTimeBlockSelects();
+
+                updatePctNote();                 // ensure note visibility matches mode
+                refreshComputationAndRedraw();
+              }
+
+              if (e.target.name === "period") {
+                state.period = e.target.value;
+                state.metricsPeriod = state.periods?.[state.period] || {};
+                recomputeRangesAbsolute();
+                updateLegend(); rebuildChoropleth(); updateLabels();
+              }
+
+              if (e.target.name === "periodFrom" || e.target.name === "periodTo") {
+                const selFrom = div.querySelector('select[name="periodFrom"]');
+                const selTo   = div.querySelector('select[name="periodTo"]');
+                state.periodFrom = selFrom.value;
+                state.periodTo   = selTo.value;
+                refreshComputationAndRedraw();
+              }
+
+              if (e.target.name === "camp")   { state.campaign = e.target.value; refreshComputationAndRedraw(); }
+              if (e.target.name === "metric") { state.metric   = e.target.value; refreshComputationAndRedraw(); }
+              if (e.target.name === "labels") {
+                state.showLabels = e.target.checked;
+                if (state.showLabels) updateLabels(); else clearLabels();
+              }
+              if (e.target.name === "la") {
+                state.includeLA = e.target.value === "on";
+                localStorage.setItem("includeLA", state.includeLA);
+                await loadDataset();
+              }
+            });
+
+            L.DomEvent.disableClickPropagation(div);
+            L.DomEvent.disableScrollPropagation(div);
+            return div;
+          },
+        });
+        return new Control();
+      }
+
+      // ---------- legend ----------
+      function ensureLegend() {
+        if (state.legend) return;
+        const Legend = L.Control.extend({
+          options: { position: "bottomright" },
+          onAdd: function () {
+            const div = L.DomUtil.create("div", "legend leaflet-bar");
+            div.innerHTML = `
+              <div><b id="legend-title"></b></div>
+              <div class="scale" id="legend-scale"></div>
+              <div><span id="legend-min"></span> – <span id="legend-max"></span></div>
+            `;
+            return div;
+          },
+        });
+        state.legend = new Legend();
+        state.map.addControl(state.legend);
+      }
+
+      function updateLegend() {
+        ensureLegend();
+        const elTitle = document.getElementById("legend-title");
+        const elMin   = document.getElementById("legend-min");
+        const elMax   = document.getElementById("legend-max");
+        const elScale = document.getElementById("legend-scale");
+
+        if (state.mode === "absolute") {
+          let [minRaw, maxRaw] =
+            state.metric === "CTR" ? state.ranges.ctr :
+            state.metric === "Clicks" ? state.ranges.clicks :
+            state.ranges.conversions;
+
+          if (state.metric !== "CTR" && minRaw <= 0) {
+            const floor = findMinPositiveCurrent(state.metric);
+            if (Number.isFinite(floor)) minRaw = floor;
+          }
+
+          elTitle.textContent = state.metric + (state.metric === "CTR" ? "" : " (log-scaled)");
+          elMin.textContent   = state.metric === "CTR" ? (minRaw*100).toFixed(1) + "%" : Math.round(minRaw).toLocaleString();
+          elMax.textContent   = state.metric === "CTR" ? (maxRaw*100).toFixed(1) + "%" : Math.round(maxRaw).toLocaleString();
+
+          const scale = chroma.scale(["#f7fbff", "#08306b"]).domain([0,1]);
+          elScale.style.background = sampleGradient(scale);
+        } else {
+          const [min,max] = state.ranges.pct;
+          elTitle.textContent = `${state.metric} % Difference`;
+          elMin.textContent   = `${min.toFixed(1)}%`;
+          elMax.textContent   = `${max.toFixed(1)}%`;
+
+          // Preview gradient matches adaptive scale
+          let previewScale;
+          if (min < 0 && max > 0) {
+            previewScale = chroma.scale(["#67000d","#f7f7f7","#08306b"]).domain([0,0.5,1]);
+          } else if (max <= 0) {
+            previewScale = chroma.scale(["#67000d","#f7f7f7"]).domain([0,1]);
+          } else {
+            previewScale = chroma.scale(["#f7fbff","#08306b"]).domain([0,1]);
+          }
+          elScale.style.background = sampleGradient(previewScale);
+        }
+      }
+
+      // ---------- labels ----------
+      let labelData = null;
+      function clearLabels() { if (state.labelLayer) { state.map.removeLayer(state.labelLayer); state.labelLayer = null; } }
+      function updateLabels() {
+        if (!labelData) return;
+        clearLabels();
+        if (!state.showLabels) return;
+        const markers = labelData.map((pt) =>
+          L.marker([pt.lat, pt.lon], {
+            icon: L.divIcon({ className: "", html: `<div class="city-label">${pt.city}</div>` }),
+            interactive: false,
+          })
+        );
+        state.labelLayer = L.layerGroup(markers).addTo(state.map);
+        function toggleByZoom() {
+          const z = state.map.getZoom();
+          state.labelLayer.getLayers().forEach((m) => (m.getElement().style.display = z >= 7 ? "block" : "none"));
+        }
+        toggleByZoom();
+        state.map.off("zoomend", toggleByZoom);
+        state.map.on("zoomend", toggleByZoom);
+      }
+
+      // ---------- load & refresh ----------
+      async function loadDataset() {
+        const json = await fetchGzipJSON(path("city_metrics", "json.gz"));
+        state.periods = json.periods || {};
+        state.metricsPeriod = state.periods[state.period] || {};
+        recomputeRangesAbsolute(); // initialize (absolute mode default)
+
+        const geo = await fetchGzipGeoOrTopoAsGeoJSON(path("regions", "geojson.gz"));
+        state.cityProp = detectCityProp(geo.features[0]);
+        if (state.fillLayer) { state.map.removeLayer(state.fillLayer); state.fillLayer = null; }
+        state.fillLayer = L.geoJSON(geo, { style: styleFeature, onEachFeature }).addTo(state.map);
+
+        labelData = await fetchGzipJSON(path("city_labels", "json.gz"));
+        updateLabels();
+        updateLegend();
+        rebuildChoropleth();
+      }
+
+      function refreshComputationAndRedraw() {
+        if (state.mode === "absolute") {
+          state.metricsPeriod = state.periods?.[state.period] || {};
+          recomputeRangesAbsolute();
+        } else {
+          pctCache = computePctDiffByCity();
+          recomputeRangesPct(pctCache);
+        }
+        updateLegend();
+        rebuildChoropleth();
+        updateLabels();
+      }
+
+      // ---------- init ----------
+      (async function main() {
+        state.map = L.map("map").setView([36.7783, -119.4179], 6);
+        L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager_nolabels/{z}/{x}/{y}.png",
+          { attribution: "&copy; OpenStreetMap contributors & Carto", maxZoom: 18 }
+        ).addTo(state.map);
+        state.map.addControl(makeControl());
+        ensureLegend();
+        await loadDataset();
+      })().catch((err) => { console.error(err); alert(err.message); });
+    </script>
+  </body>
+</html>
