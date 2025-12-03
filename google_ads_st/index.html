@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>California Cities Heatmap</title>
+    <title>Google Ads ST Heatmap - California</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
 
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
@@ -103,10 +103,10 @@
       const CAMPAIGNS = ["ALL","Display","Search"];
       const EPS = 1e-9;
 
-      // UPDATED thresholds
-      const THRESHOLDS = {
-        "Page views":      { minPV: 15 },
-        "Form conversions": { minForms: 1 },
+      // Default thresholds (per metric), used to seed state / localStorage
+      const DEFAULT_THRESHOLDS = {
+        "Page views":      { min: 15 },
+        "Form conversions": { min: 1 },
       };
 
       const state = {
@@ -140,6 +140,17 @@
         legend: null,
         showLabels: true,
         includeLA: (localStorage.getItem("includeLA") ?? "true") === "true",
+
+        // dynamic thresholds per metric (loaded from localStorage or defaults)
+        thresholds: (() => {
+          try {
+            const saved = localStorage.getItem("thresholds_v1");
+            if (saved) return JSON.parse(saved);
+          } catch (e) {
+            console.warn("Could not parse saved thresholds", e);
+          }
+          return JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)); // deep copy
+        })(),
       };
 
       function baseDir() {
@@ -226,6 +237,11 @@
         const dictFrom = state.aggregatedFrom?.[state.campaign] || {};
         const dictTo   = state.aggregatedTo?.[state.campaign]   || {};
 
+        const thrCfg =
+          (state.thresholds && state.thresholds[state.metric]) ||
+          { min: 0 };
+        const minVol = thrCfg.min ?? 0;
+
         const cities = new Set([...Object.keys(dictFrom), ...Object.keys(dictTo)]);
         for (const city of cities) {
           const recFrom = dictFrom[city] || { val_pv: 0, val_forms: 0 };
@@ -235,14 +251,12 @@
           if (state.metric === "Page views") {
             vFrom = Number(recFrom.val_pv)   || 0;
             vTo   = Number(recTo.val_pv)     || 0;
-            const thr = THRESHOLDS["Page views"].minPV;
-            passes = vFrom >= thr && vTo >= thr;
           } else {
             vFrom = Number(recFrom.val_forms) || 0;
             vTo   = Number(recTo.val_forms)   || 0;
-            const thr = THRESHOLDS["Form conversions"].minForms;
-            passes = vFrom >= thr && vTo >= thr;
           }
+
+          passes = vFrom >= minVol && vTo >= minVol;
 
           let pct = NaN;
           if (passes && Math.abs(vFrom) > EPS) {
@@ -445,6 +459,15 @@
             }
             html += '<hr/>';
 
+            // NEW: dynamic threshold control
+            html += '<h4>% Diff Min Volume</h4>';
+            html += '<div class="date-row">';
+            html += '  <span>Min</span>';
+            html += '  <input type="number" id="thr-input" name="thr" min="0" step="1" style="width:70px" />';
+            html += '</div>';
+            html += '<div class="muted">Applies to current metric in % mode.</div>';
+            html += '<hr/>';
+
             html += '<h4>Labels</h4>';
             html += `<label><input type="checkbox" name="labels" ${state.showLabels ? 'checked' : ''}/> City Name</label>`;
             html += '<hr/>';
@@ -459,20 +482,34 @@
               const el = div.querySelector('#pct-note');
               if (!el) return;
               if (state.mode === 'pct') {
+                const thrCfg =
+                  (state.thresholds && state.thresholds[state.metric]) ||
+                  { min: 0 };
                 el.style.display = 'block';
-                el.innerHTML = '<b>NOTE: CITY SHADING IS NEUTRAL</b><br>' +
-                               'if either range has very low volume.<br>' +
-                               'Page views: min 15 in each range<br>' +
-                               'Form conversions: min 1 in each range.';
+                el.innerHTML =
+                  '<b>NOTE:</b> Shading is neutral if either range has very low volume for a city.<br>' +
+                  `Current minimum for <b>${state.metric}</b>: ${thrCfg.min}.<br>` +
+                  'Adjust using the "% Diff Min Volume" control below.';
               } else {
                 el.style.display = 'none';
                 el.textContent = '';
               }
             }
 
+            function syncThresholdInput() {
+              const input = div.querySelector('#thr-input');
+              if (!input) return;
+              const thrCfg =
+                (state.thresholds && state.thresholds[state.metric]) ||
+                { min: 0 };
+              input.value = thrCfg.min;
+              input.disabled = (state.mode !== 'pct');
+            }
+
             // After HTML is in place, sync any existing meta-driven dates
             syncAllDateInputs();
             updatePctNote();
+            syncThresholdInput();
 
             div.addEventListener("change", async (e) => {
               if (e.target.name === "mode") {
@@ -481,6 +518,7 @@
                 tb.innerHTML = renderTimeControlsHTML();
                 syncAllDateInputs();
                 updatePctNote();
+                syncThresholdInput();
                 refreshComputationAndRedraw();
               }
 
@@ -491,6 +529,8 @@
 
               if (e.target.name === "metric") {
                 state.metric = e.target.value;
+                updatePctNote();
+                syncThresholdInput();
                 refreshComputationAndRedraw();
               }
 
@@ -503,6 +543,27 @@
                 state.includeLA = e.target.value === "on";
                 localStorage.setItem("includeLA", state.includeLA);
                 await loadDataset();
+              }
+
+              // Threshold input
+              if (e.target.name === "thr") {
+                const val = Number(e.target.value);
+                if (Number.isFinite(val) && val >= 0) {
+                  if (!state.thresholds[state.metric]) {
+                    state.thresholds[state.metric] = { min: val };
+                  } else {
+                    state.thresholds[state.metric].min = val;
+                  }
+                  try {
+                    localStorage.setItem("thresholds_v1", JSON.stringify(state.thresholds));
+                  } catch (err) {
+                    console.warn("Could not save thresholds", err);
+                  }
+                  if (state.mode === "pct") {
+                    updatePctNote();
+                    refreshComputationAndRedraw();
+                  }
+                }
               }
 
               // Date inputs
@@ -544,7 +605,7 @@
       function ensureLegend() {
         if (state.legend) return;
         const Legend = L.Control.extend({
-          options: { position: "bottomright" },
+          options: { position: "bottomleft" },
           onAdd: function () {
             const div = L.DomUtil.create("div", "legend leaflet-bar");
             div.innerHTML = `
