@@ -464,15 +464,18 @@
             html += `<label><input type="radio" name="mode" value="absolute" ${state.mode === 'absolute' ? 'checked' : ''}/> Absolute</label>`;
             html += `<label><input type="radio" name="mode" value="pct" ${state.mode === 'pct' ? 'checked' : ''}/> % Difference</label>`;
             html += '<hr/><div id="time-block">' + renderTimeControlsHTML() + '</div>';
-            html += '<div id="pct-note" class="note muted" style="display:none"></div><br>';
 
-            // Moved here: dynamic threshold control directly under time / ranges
+            // pct-only block (note + thresholds)
+            const pctInitialDisplay = state.mode === 'pct' ? '' : 'none';
+            html += `<div id="pct-controls-block" style="display:${pctInitialDisplay};">`;
+            html += '<div id="pct-note" class="note muted"></div><br>';
             html += '<h4>% Diff Min Volume</h4>';
             html += '<div class="date-row">';
             html += '  <span>Min</span>';
             html += '  <input type="number" id="thr-input" name="thr" min="0" step="1" style="width:70px" />';
             html += '</div>';
             html += '<div class="muted">Applies to current metric in % mode.</div>';
+            html += '</div>'; // end pct-controls-block
             html += '<hr/>';
 
             html += '<h4>Campaign</h4>';
@@ -497,38 +500,41 @@
 
             div.innerHTML = html;
 
-            function updatePctNote() {
-              const el = div.querySelector('#pct-note');
-              if (!el) return;
+            function updatePctUI() {
+              const note = div.querySelector('#pct-note');
+              const block = div.querySelector('#pct-controls-block');
+              const thrInput = div.querySelector('#thr-input');
+
               if (state.mode === 'pct') {
+                if (block) block.style.display = '';
                 const thrCfg =
                   (state.thresholds && state.thresholds[state.metric]) ||
                   { min: 0 };
-                el.style.display = 'block';
-                el.innerHTML =
-                  '<b>NOTE:</b> Shading is neutral if either range has very low volume.<br>' +
-                  `Current minimum for <b>${state.metric}</b>: ${thrCfg.min}.<br>` +
-                  'Adjust using the "% Diff Min Volume" control below.';
+                if (note) {
+                  note.style.display = 'block';
+                  note.innerHTML =
+                    '<b>NOTE:</b> Shading is neutral if either range has low volume.<br>' +
+                    `Current minimum for <b>${state.metric}</b>: ${thrCfg.min}.`;
+                }
+                if (thrInput) {
+                  thrInput.disabled = false;
+                  thrInput.value = thrCfg.min;
+                }
               } else {
-                el.style.display = 'none';
-                el.textContent = '';
+                if (block) block.style.display = 'none';
+                if (note) {
+                  note.style.display = 'none';
+                  note.textContent = '';
+                }
+                if (thrInput) {
+                  thrInput.disabled = true;
+                }
               }
-            }
-
-            function syncThresholdInput() {
-              const input = div.querySelector('#thr-input');
-              if (!input) return;
-              const thrCfg =
-                (state.thresholds && state.thresholds[state.metric]) ||
-                { min: 0 };
-              input.value = thrCfg.min;
-              input.disabled = (state.mode !== 'pct');
             }
 
             // After HTML is in place, sync any existing meta-driven dates
             syncAllDateInputs();
-            updatePctNote();
-            syncThresholdInput();
+            updatePctUI();
 
             div.addEventListener("change", async (e) => {
               if (e.target.name === "mode") {
@@ -536,8 +542,7 @@
                 const tb = div.querySelector("#time-block");
                 tb.innerHTML = renderTimeControlsHTML();
                 syncAllDateInputs();
-                updatePctNote();
-                syncThresholdInput();
+                updatePctUI();
                 refreshComputationAndRedraw();
               }
 
@@ -548,8 +553,7 @@
 
               if (e.target.name === "metric") {
                 state.metric = e.target.value;
-                updatePctNote();
-                syncThresholdInput();
+                updatePctUI();
                 refreshComputationAndRedraw();
               }
 
@@ -579,7 +583,6 @@
                     console.warn("Could not save thresholds", err);
                   }
                   if (state.mode === "pct") {
-                    updatePctNote();
                     refreshComputationAndRedraw();
                   }
                 }
