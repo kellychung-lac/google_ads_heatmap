@@ -105,8 +105,8 @@
 
       // Default thresholds (per metric), used to seed state / localStorage
       const DEFAULT_THRESHOLDS = {
-        "Page views":      { min: 15 },
-        "Form conversions": { min: 1 },
+        "Page Views":      { min: 15 },
+        "Form Conversions": { min: 1 },
       };
 
       const state = {
@@ -122,7 +122,7 @@
         dateToB:   null,
 
         campaign: "ALL",
-        metric: "Page views",   // "Page views" | "Form conversions"
+        metric: "Page Views",   // "Page Views" | "Form Conversions"
 
         daily: null,            // json.daily
         meta: null,             // json.meta {min_date, max_date}
@@ -143,13 +143,33 @@
 
         // dynamic thresholds per metric (loaded from localStorage or defaults)
         thresholds: (() => {
+          let base = null;
           try {
             const saved = localStorage.getItem("thresholds_v1");
-            if (saved) return JSON.parse(saved);
+            if (saved) base = JSON.parse(saved);
           } catch (e) {
             console.warn("Could not parse saved thresholds", e);
           }
-          return JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)); // deep copy
+          if (!base) {
+            base = JSON.parse(JSON.stringify(DEFAULT_THRESHOLDS)); // deep copy
+          }
+
+          // Migrate any old keys ("Page views"/"Form conversions") to new labels
+          if (base["Page views"] && !base["Page Views"]) {
+            base["Page Views"] = base["Page views"];
+            delete base["Page views"];
+          }
+          if (base["Form conversions"] && !base["Form Conversions"]) {
+            base["Form Conversions"] = base["Form conversions"];
+            delete base["Form conversions"];
+          }
+
+          // Ensure both keys exist
+          for (const [k, def] of Object.entries(DEFAULT_THRESHOLDS)) {
+            if (!base[k]) base[k] = { ...def };
+          }
+
+          return base;
         })(),
       };
 
@@ -221,7 +241,7 @@
       }
 
       function findMinPositiveCurrent(metric) {
-        const key = metric === "Page views" ? "val_pv" : "val_forms";
+        const key = metric === "Page Views" ? "val_pv" : "val_forms";
         const byCity = (state.aggregatedAbs?.[state.campaign]) || {};
         let m = Infinity;
         for (const rec of Object.values(byCity)) {
@@ -248,7 +268,7 @@
           const recTo   = dictTo[city]   || { val_pv: 0, val_forms: 0 };
 
           let vFrom, vTo, passes;
-          if (state.metric === "Page views") {
+          if (state.metric === "Page Views") {
             vFrom = Number(recFrom.val_pv)   || 0;
             vTo   = Number(recTo.val_pv)     || 0;
           } else {
@@ -298,7 +318,7 @@
       // ---------- styling / tooltips ----------
       function getScaleAbsolute(metric) {
         const [minRaw, maxRaw] =
-          metric === "Page views" ? state.ranges.page_views : state.ranges.form_conv;
+          metric === "Page Views" ? state.ranges.page_views : state.ranges.form_conv;
 
         const eps = 1e-9;
         const minPos = findMinPositiveCurrent(metric) || eps;
@@ -317,7 +337,7 @@
         const city = feat.properties[state.cityProp];
         if (state.mode === "absolute") {
           const rec  = (state.aggregatedAbs?.[state.campaign] || {})[city] || null;
-          const v = state.metric === "Page views" ? rec?.val_pv : rec?.val_forms;
+          const v = state.metric === "Page Views" ? rec?.val_pv : rec?.val_forms;
           const fill = getScaleAbsolute(state.metric)(v);
           return { color:"#000", weight:0.4, fillColor:fill, fillOpacity:Number.isFinite(v)?0.75:0.25 };
         } else {
@@ -329,7 +349,7 @@
 
       function formatValueAbsolute(rec) {
         if (!rec) return "—";
-        const v = state.metric === "Page views" ? rec.val_pv : rec.val_forms;
+        const v = state.metric === "Page Views" ? rec.val_pv : rec.val_forms;
         return Number.isFinite(v) ? Math.round(v).toLocaleString() : "—";
       }
 
@@ -411,7 +431,7 @@
           `;
         } else {
           return `
-            <h4>Range A (From)</h4>
+            <h4>Range A</h4>
             <div class="date-row">
               <span>From</span>
               <input type="date" id="from-date-a" name="from_date_a" />
@@ -420,7 +440,7 @@
               <span>To</span>
               <input type="date" id="to-date-a" name="to_date_a" />
             </div>
-            <h4 style="margin-top:6px;">Range B (To)</h4>
+            <h4 style="margin-top:6px;">Range B</h4>
             <div class="date-row">
               <span>From</span>
               <input type="date" id="from-date-b" name="from_date_b" />
@@ -445,6 +465,14 @@
             html += `<label><input type="radio" name="mode" value="pct" ${state.mode === 'pct' ? 'checked' : ''}/> % Difference</label>`;
             html += '<hr/><div id="time-block">' + renderTimeControlsHTML() + '</div>';
             html += '<div id="pct-note" class="note muted" style="display:none"></div>';
+
+            // Moved here: dynamic threshold control directly under time / ranges
+            html += '<h4>% Diff Min Volume</h4>';
+            html += '<div class="date-row">';
+            html += '  <span>Min</span>';
+            html += '  <input type="number" id="thr-input" name="thr" min="0" step="1" style="width:70px" />';
+            html += '</div>';
+            html += '<div class="muted">Applies to current metric in % mode.</div>';
             html += '<hr/>';
 
             html += '<h4>Campaign</h4>';
@@ -454,18 +482,9 @@
             html += '<hr/>';
 
             html += '<h4>Metric</h4>';
-            for (const m of ["Page views","Form conversions"]) {
+            for (const m of ["Page Views","Form Conversions"]) {
               html += `<label><input type="radio" name="metric" value="${m}" ${state.metric === m ? 'checked' : ''}/> ${m}</label>`;
             }
-            html += '<hr/>';
-
-            // NEW: dynamic threshold control
-            html += '<h4>% Diff Min Volume</h4>';
-            html += '<div class="date-row">';
-            html += '  <span>Min</span>';
-            html += '  <input type="number" id="thr-input" name="thr" min="0" step="1" style="width:70px" />';
-            html += '</div>';
-            html += '<div class="muted">Applies to current metric in % mode.</div>';
             html += '<hr/>';
 
             html += '<h4>Labels</h4>';
@@ -629,7 +648,7 @@
 
         if (state.mode === "absolute") {
           const [minRaw, maxRaw] =
-            state.metric === "Page views" ? state.ranges.page_views : state.ranges.form_conv;
+            state.metric === "Page Views" ? state.ranges.page_views : state.ranges.form_conv;
 
           let min = minRaw;
           if (min <= 0) {
