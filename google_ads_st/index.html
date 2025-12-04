@@ -464,7 +464,7 @@
             html += `<label><input type="radio" name="mode" value="absolute" ${state.mode === 'absolute' ? 'checked' : ''}/> Absolute</label>`;
             html += `<label><input type="radio" name="mode" value="pct" ${state.mode === 'pct' ? 'checked' : ''}/> % Difference</label>`;
             html += '<hr/><div id="time-block">' + renderTimeControlsHTML() + '</div>';
-            html += '<div id="pct-note" class="note muted" style="display:none"></div>';
+            html += '<div id="pct-note" class="note muted" style="display:none"></div><br>';
 
             // Moved here: dynamic threshold control directly under time / ranges
             html += '<h4>% Diff Min Volume</h4>';
@@ -506,7 +506,7 @@
                   { min: 0 };
                 el.style.display = 'block';
                 el.innerHTML =
-                  '<b>NOTE:</b> Shading is neutral if either range has very low volume for a city.<br>' +
+                  '<b>NOTE:</b> Shading is neutral if either range has very low volume.<br>' +
                   `Current minimum for <b>${state.metric}</b>: ${thrCfg.min}.<br>` +
                   'Adjust using the "% Diff Min Volume" control below.';
               } else {
